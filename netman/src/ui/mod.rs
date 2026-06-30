@@ -8,10 +8,14 @@
 
 mod connection_list;
 mod detail_panel;
+mod password_prompt;
 mod status_bar;
+mod text_input;
 
 #[cfg(test)]
 mod tests;
+
+pub use text_input::TextInput;
 
 use ratatui::{
     Frame,
@@ -68,6 +72,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if app.show_help {
         render_help_overlay(frame, area);
+    }
+
+    if let Some(prompt) = &app.password_prompt {
+        password_prompt::render(frame, area, prompt);
     }
 }
 

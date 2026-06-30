@@ -7,13 +7,14 @@
 
 use std::time::Duration;
 
+use crate::ui::TextInput;
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use libnetman::connection::{Connection, ConnectionStatus, NmState};
+use libnetman::connection::{Connection, ConnectionStatus, NmState, WifiSecurity};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::time;
@@ -71,8 +72,14 @@ pub async fn run(settings: Settings) -> Result<()> {
                                     Action::Scan => app.on_scan().await,
                                     Action::ToggleNetworking => app.on_toggle_networking().await,
                                     Action::ToggleWireless => app.on_toggle_wireless().await,
+                                    Action::ConnectUnsaved {
+                                        ssid,
+                                        security,
+                                        password,
+                                    } => app.on_connect_unsaved(ssid, security, password).await,
                                 }
                             }
+                            Ok(Event::Paste(text)) => app.handle_paste(&text),
                             Ok(Event::Resize(_, _)) => {}
                             Ok(_) => {}
                             Err(e) => break Err(anyhow::anyhow!("terminal event error: {e}")),
@@ -116,9 +123,32 @@ pub struct App {
     pub show_help: bool,
     /// Status message shown in the status bar (clears after NM state changes).
     pub status_message: Option<String>,
+    /// Wi-Fi password overlay for connecting to unsaved networks.
+    pub password_prompt: Option<PasswordPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
+}
+
+/// State for the Wi-Fi password modal.
+pub struct PasswordPrompt {
+    pub ssid: String,
+    pub security: WifiSecurity,
+    pub input: TextInput,
+    pub show_password: bool,
+    pub error: Option<String>,
+}
+
+impl PasswordPrompt {
+    pub fn new(ssid: String, security: WifiSecurity) -> Self {
+        Self {
+            ssid,
+            security,
+            input: TextInput::new(),
+            show_password: false,
+            error: None,
+        }
+    }
 }
 
 /// Waits for NM active-connection state change signals when D-Bus is enabled.
@@ -181,6 +211,11 @@ enum Action {
     Scan,
     ToggleNetworking,
     ToggleWireless,
+    ConnectUnsaved {
+        ssid: String,
+        security: WifiSecurity,
+        password: Option<String>,
+    },
 }
 
 impl App {
@@ -203,6 +238,7 @@ impl App {
                         demo_mode: false,
                         show_help: false,
                         status_message: None,
+                        password_prompt: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -226,6 +262,7 @@ impl App {
             demo_mode: true,
             show_help: false,
             status_message: Some("Demo mode — NetworkManager not available".into()),
+            password_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -268,6 +305,10 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        if let Some(action) = self.handle_password_key(code, modifiers) {
+            return action;
+        }
+
         match code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return Action::Quit,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -293,6 +334,54 @@ impl App {
             _ => {}
         }
         Action::Continue
+    }
+
+    fn handle_password_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.password_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.password_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                if prompt.security.is_secured() && prompt.input.is_empty() {
+                    prompt.error = Some("Password is required.".into());
+                    return Some(Action::Continue);
+                }
+                let ssid = prompt.ssid.clone();
+                let security = prompt.security;
+                let password = if prompt.security.is_secured() {
+                    Some(prompt.input.text().to_owned())
+                } else {
+                    None
+                };
+                Some(Action::ConnectUnsaved {
+                    ssid,
+                    security,
+                    password,
+                })
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                prompt.show_password = !prompt.show_password;
+                Some(Action::Continue)
+            }
+            _ => {
+                if prompt.input.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.password_prompt {
+            prompt.input.insert_str(text);
+            prompt.error = None;
+        }
     }
 
     fn connection_indices(&self) -> Vec<usize> {
@@ -343,11 +432,25 @@ impl App {
         }
 
         if !conn.is_saved() {
-            self.status_message = Some(format!(
-                "'{}' is visible only — password prompt coming in a future release.",
-                conn.label()
-            ));
-            return Action::Continue;
+            let libnetman::connection::ConnectionKind::Wifi(wifi) = &conn.kind else {
+                return Action::Continue;
+            };
+            if matches!(wifi.security, WifiSecurity::Enterprise | WifiSecurity::Wep) {
+                self.status_message = Some(format!(
+                    "{} networks cannot be connected from here.",
+                    wifi.security.label()
+                ));
+                return Action::Continue;
+            }
+            if wifi.security.is_secured() {
+                self.password_prompt = Some(PasswordPrompt::new(wifi.ssid.clone(), wifi.security));
+                return Action::Continue;
+            }
+            return Action::ConnectUnsaved {
+                ssid: wifi.ssid.clone(),
+                security: wifi.security,
+                password: None,
+            };
         }
 
         if conn.is_active() {
@@ -470,6 +573,44 @@ impl App {
                 Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
             }
         }
+    }
+
+    async fn on_connect_unsaved(
+        &mut self,
+        ssid: String,
+        security: WifiSecurity,
+        password: Option<String>,
+    ) {
+        if self.demo_mode {
+            self.password_prompt = None;
+            self.status_message = Some("Demo mode — connect not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm
+                .add_and_activate_wifi(&ssid, security, password.as_deref())
+                .await
+            {
+                Ok(()) => {
+                    self.password_prompt = None;
+                    self.status_message = Some("Activating…".into());
+                }
+                Err(e) => {
+                    if password.is_some() {
+                        if let Some(prompt) = &mut self.password_prompt {
+                            prompt.error = Some(e.to_string());
+                        }
+                    } else {
+                        self.password_prompt = None;
+                        self.status_message = Some(format!("Connection failed: {e}"));
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = (ssid, security, password);
     }
 
     #[cfg(feature = "dbus")]

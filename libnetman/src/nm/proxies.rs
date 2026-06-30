@@ -56,6 +56,14 @@ pub trait NetworkManager {
 
     /// Deactivate an active connection.
     fn deactivate_connection(&self, active_connection: &str) -> zbus::Result<()>;
+
+    /// Add a new connection from settings and activate it immediately.
+    fn add_and_activate_connection(
+        &self,
+        connection: HashMap<String, HashMap<String, OwnedValue>>,
+        device: &str,
+        specific_object: &str,
+    ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
 // ── org.freedesktop.NetworkManager.Settings ───────────────────────────────────

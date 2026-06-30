@@ -7,6 +7,7 @@
 //! service and presents the results as the domain types from [`crate::connection`].
 
 mod proxies;
+mod wifi_settings;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -156,6 +157,23 @@ impl NmClient {
         let path = settings.get_connection_by_uuid(uuid).await?;
         let nm = NetworkManagerProxy::new(&self.conn).await?;
         nm.activate_connection(path.as_str(), "/", "/").await?;
+        Ok(())
+    }
+
+    /// Create a Wi-Fi profile from inline settings and activate it.
+    pub async fn add_and_activate_wifi(
+        &self,
+        ssid: &str,
+        security: WifiSecurity,
+        password: Option<&str>,
+    ) -> Result<()> {
+        use wifi_settings::wifi_connection_settings;
+
+        let settings = wifi_connection_settings(ssid, security, password)?;
+        let device = self.find_wireless_path().await?;
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        nm.add_and_activate_connection(settings, device.as_str(), "/")
+            .await?;
         Ok(())
     }
 
