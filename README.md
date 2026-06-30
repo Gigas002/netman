@@ -41,29 +41,19 @@ scan, and profile changes are disabled.
 - **Edit** (`e`) saved Wi-Fi, Ethernet, and VPN profiles
 - **Add** (`a`) new Wi-Fi, Ethernet, or VPN connections
 - **Delete** (`D`) saved profiles with confirmation
-- VPN: pick an installed plugin, import a file (`.ovpn`, etc.), or enter basic
-  manual settings (gateway, username, password)
+- Connection editor mirrors nm-applet / `nm-connection-editor` basics:
+  - **Autoconnect** and **auto-connect VPN** (Wi-Fi / Ethernet)
+  - **IPv4 and IPv6** method, address, gateway, DNS
+  - Ethernet: MTU, cloned MAC
+- VPN: pick an installed plugin, import a file (`.ovpn`, etc.), or enter manual
+  settings — gateway (plugin-specific key), credentials, OpenVPN port/protocol,
+  VPNC group name
 
 ### Detail panel
 
 - IPv4 and IPv6 address, gateway, and DNS (when connected)
 - Wi-Fi: BSSID, band, security type
 - VPN: plugin service type
-
-## Out of scope (v1)
-
-`netman` targets everyday Wi-Fi / Ethernet / VPN use — not the full
-NetworkManager or `nm-connection-editor` surface. Not supported in v1:
-
-- Mobile broadband / modems (planned as optional `mobile` feature)
-- 802.1X enterprise Wi-Fi and WEP
-- Full per-plugin VPN property matrices
-- IPv6 profile editing (display only; new profiles set IPv6 to ignore)
-- Bridges, bonds, VLANs, PPPoE, Bluetooth PAN, hotspots
-- Captive portal browser launch
-- Spawning external editors (`nm-connection-editor`)
-
-See [`docs/PLAN.md`](docs/PLAN.md) for the implementation roadmap.
 
 ## Workspace layout
 
