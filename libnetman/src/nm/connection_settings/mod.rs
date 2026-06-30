@@ -30,7 +30,7 @@ pub fn parse_profile(
     match conn_type.as_str() {
         "802-11-wireless" => ConnectionProfile::Wifi(parse_wifi(raw, secrets)),
         "802-3-ethernet" => ConnectionProfile::Ethernet(parse_ethernet(raw)),
-        "vpn" => ConnectionProfile::Vpn(parse_vpn(raw)),
+        "vpn" => ConnectionProfile::Vpn(parse_vpn(raw, secrets)),
         other => ConnectionProfile::Unsupported {
             id,
             conn_type: other.to_owned(),
@@ -200,10 +200,32 @@ fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Etherne
     }
 }
 
-fn parse_vpn(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> VpnProfile {
+fn parse_vpn(
+    raw: &HashMap<String, HashMap<String, OwnedValue>>,
+    secrets: Option<&HashMap<String, HashMap<String, OwnedValue>>>,
+) -> VpnProfile {
+    let vpn_section = raw.get("vpn");
+    let gateway = vpn_section
+        .and_then(|s| get_str_value(s, "remote"))
+        .unwrap_or_default();
+    let username = vpn_section
+        .and_then(|s| get_str_value(s, "username"))
+        .unwrap_or_default();
+    let password = secrets
+        .and_then(|s| s.get("vpn-secrets"))
+        .and_then(|sec| get_str_value(sec, "password"))
+        .or_else(|| {
+            raw.get("vpn-secrets")
+                .and_then(|sec| get_str_value(sec, "password"))
+        })
+        .unwrap_or_default();
+
     VpnProfile {
         name: get_str_field(raw, "connection", "id").unwrap_or_default(),
         service_type: get_str_field(raw, "vpn", "service-type").unwrap_or_default(),
+        gateway,
+        username,
+        password,
         ipv4: parse_ipv4(raw),
     }
 }
@@ -356,6 +378,27 @@ fn apply_vpn(
 
     let section = settings.entry("vpn".into()).or_default();
     section.insert("service-type".into(), str_value(vpn.service_type.trim()));
+
+    if !vpn.gateway.trim().is_empty() {
+        section.insert("remote".into(), str_value(vpn.gateway.trim()));
+    } else {
+        section.remove("remote");
+    }
+    if !vpn.username.trim().is_empty() {
+        section.insert("username".into(), str_value(vpn.username.trim()));
+    } else {
+        section.remove("username");
+    }
+    if vpn.service_type.contains("openvpn") {
+        section.insert("connection-type".into(), str_value("password"));
+    }
+
+    if !vpn.password.is_empty() {
+        let secrets = settings.entry("vpn-secrets".into()).or_default();
+        secrets.insert("password".into(), str_value(&vpn.password));
+    } else {
+        settings.remove("vpn-secrets");
+    }
 
     apply_ipv4(settings, &vpn.ipv4)?;
     Ok(())

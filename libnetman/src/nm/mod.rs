@@ -10,6 +10,8 @@ mod connection_settings;
 mod proxies;
 mod wifi_settings;
 
+use crate::vpn_plugins;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -266,6 +268,46 @@ impl NmClient {
         Ok(uuid)
     }
 
+    /// Import a VPN profile from an external file using `nmcli` and the NM VPN
+    /// editor plugin for `plugin_name` (e.g. `openvpn`).
+    pub async fn import_vpn_from_file(
+        &self,
+        plugin_name: &str,
+        path: &str,
+        activate: bool,
+    ) -> Result<String> {
+        if !std::path::Path::new(path).is_file() {
+            return Err(Error::OperationFailed(format!("file not found: {path}")));
+        }
+
+        let output = tokio::process::Command::new("nmcli")
+            .args(["connection", "import", "type", plugin_name, "file", path])
+            .output()
+            .await
+            .map_err(|e| Error::OperationFailed(format!("nmcli not available: {e}")))?;
+
+        if !output.status.success() {
+            let msg = String::from_utf8_lossy(&output.stderr);
+            let detail = msg.trim();
+            if detail.is_empty() {
+                return Err(Error::OperationFailed("VPN import failed".into()));
+            }
+            return Err(Error::OperationFailed(detail.to_owned()));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let uuid = if let Some(uuid) = vpn_plugins::parse_import_uuid(&stdout) {
+            uuid
+        } else {
+            self.uuid_for_imported_connection(&stdout).await?
+        };
+
+        if activate {
+            self.activate(&uuid).await?;
+        }
+        Ok(uuid)
+    }
+
     /// Deactivate (disconnect) an active connection by UUID.
     pub async fn deactivate(&self, uuid: &str) -> Result<()> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;
@@ -303,13 +345,58 @@ impl NmClient {
             .await?;
         let raw = sc.get_settings().await?;
 
-        let secrets = if raw.contains_key("802-11-wireless-security") {
-            sc.get_secrets("802-11-wireless-security").await.ok()
-        } else {
+        let mut secrets: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+        if raw.contains_key("802-11-wireless-security")
+            && let Ok(s) = sc.get_secrets("802-11-wireless-security").await
+        {
+            secrets.extend(s);
+        }
+        if raw.contains_key("vpn")
+            && let Ok(s) = sc.get_secrets("vpn").await
+        {
+            secrets.extend(s);
+        }
+        let secrets = if secrets.is_empty() {
             None
+        } else {
+            Some(secrets)
         };
 
         Ok((raw, secrets))
+    }
+
+    async fn uuid_for_imported_connection(&self, stdout: &str) -> Result<String> {
+        let name = stdout
+            .split("Connection '")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+
+        let Some(name) = name else {
+            return Err(Error::OperationFailed(
+                "could not determine imported connection UUID".into(),
+            ));
+        };
+
+        let settings = SettingsProxy::new(&self.conn).await?;
+        for path in settings.list_connections().await? {
+            let sc = SettingsConnectionProxy::builder(&self.conn)
+                .path(path.as_str())
+                .map_err(|e| Error::DBus(e.to_string()))?
+                .build()
+                .await?;
+            let raw = sc.get_settings().await?;
+            if get_str_field(&raw, "connection", "id").as_deref() == Some(name)
+                && let Some(uuid) = get_str_field(&raw, "connection", "uuid")
+            {
+                return Ok(uuid);
+            }
+        }
+
+        Err(Error::OperationFailed(format!(
+            "imported connection '{name}' not found"
+        )))
     }
 
     async fn build_connection(
@@ -612,6 +699,9 @@ pub(crate) fn security_from_ap(flags: u32, wpa_flags: u32, rsn_flags: u32) -> Wi
     }
     WifiSecurity::None
 }
+
+#[cfg(feature = "dbus")]
+pub use crate::vpn_plugins::{VpnPluginInfo, list_installed_plugins};
 
 #[cfg(test)]
 mod tests;

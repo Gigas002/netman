@@ -89,7 +89,7 @@ fn field_value(
     focused: bool,
     width: u16,
 ) -> Line<'static> {
-    if field.is_text(editor.is_new()) {
+    if field.is_text() {
         let input = editor.inputs.get(&field);
         let secret = field.is_secret();
         if let Some(input) = input {

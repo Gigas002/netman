@@ -83,6 +83,11 @@ pub async fn run(settings: Settings) -> Result<()> {
                                     } => app.on_connect_unsaved(ssid, security, password, hidden).await,
                                     Action::EditConnection(uuid) => app.on_edit_connection(uuid).await,
                                     Action::SaveConnection => app.on_save_connection().await,
+                                    Action::ImportVpn {
+                                        plugin_name,
+                                        path,
+                                        activate,
+                                    } => app.on_import_vpn(plugin_name, path, activate).await,
                                 }
                             }
                             Ok(Event::Paste(text)) => app.handle_paste(&text),
@@ -137,6 +142,10 @@ pub struct App {
     pub connection_editor: Option<ConnectionEditor>,
     /// Add-connection type picker.
     pub add_connection_menu: Option<AddConnectionMenu>,
+    /// VPN-specific add sub-menu.
+    pub vpn_add_menu: Option<VpnAddMenu>,
+    /// VPN file import overlay.
+    pub vpn_import_prompt: Option<VpnImportPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
@@ -226,6 +235,9 @@ pub enum EditorFieldId {
     Mtu,
     ClonedMac,
     VpnServiceType,
+    VpnGateway,
+    VpnUsername,
+    VpnPassword,
     ConnectionName,
     Activate,
 }
@@ -285,6 +297,71 @@ impl AddConnectionMenu {
 
     pub fn selected_kind(&self) -> NewConnectionKind {
         NewConnectionKind::all()[self.selected]
+    }
+}
+
+/// VPN add sub-menu listing installed plugins plus import.
+pub struct VpnAddMenu {
+    pub plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>,
+    pub selected: usize,
+}
+
+impl VpnAddMenu {
+    pub fn item_count(&self) -> usize {
+        self.plugins.len() + 1
+    }
+
+    pub fn item_label(&self, idx: usize) -> String {
+        if let Some(plugin) = self.plugins.get(idx) {
+            format!("Configure {}…", plugin.label)
+        } else {
+            "[ Import from file… ]".into()
+        }
+    }
+
+    pub fn is_import(&self, idx: usize) -> bool {
+        idx >= self.plugins.len()
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).rem_euclid(count as i32) as usize;
+    }
+}
+
+/// State for the VPN file import modal.
+pub struct VpnImportPrompt {
+    pub plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>,
+    pub selected_plugin: usize,
+    pub path: TextInput,
+    pub activate_on_save: bool,
+    pub error: Option<String>,
+}
+
+impl VpnImportPrompt {
+    pub fn new(plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>) -> Self {
+        Self {
+            plugins,
+            selected_plugin: 0,
+            path: TextInput::new(),
+            activate_on_save: true,
+            error: None,
+        }
+    }
+
+    fn cycle_plugin(&mut self, forward: bool) {
+        if self.plugins.is_empty() {
+            return;
+        }
+        let count = self.plugins.len();
+        if forward {
+            self.selected_plugin = (self.selected_plugin + 1) % count;
+        } else {
+            self.selected_plugin = (self.selected_plugin + count - 1) % count;
+        }
     }
 }
 
@@ -367,7 +444,7 @@ impl ConnectionEditor {
         let Some(field) = self.focused_field() else {
             return;
         };
-        if !field.is_text(self.is_new()) {
+        if !field.is_text() {
             return;
         }
         let Some(input) = self.inputs.get(&field) else {
@@ -379,7 +456,7 @@ impl ConnectionEditor {
 
     fn sync_all_text(&mut self) {
         for field in &self.fields {
-            if field.is_text(self.is_new())
+            if field.is_text()
                 && let Some(input) = self.inputs.get(field)
             {
                 apply_text_field(&mut self.profile, *field, input.text());
@@ -538,6 +615,11 @@ enum Action {
     },
     EditConnection(String),
     SaveConnection,
+    ImportVpn {
+        plugin_name: String,
+        path: String,
+        activate: bool,
+    },
 }
 
 impl App {
@@ -564,6 +646,8 @@ impl App {
                         hidden_network_prompt: None,
                         connection_editor: None,
                         add_connection_menu: None,
+                        vpn_add_menu: None,
+                        vpn_import_prompt: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -591,6 +675,8 @@ impl App {
             hidden_network_prompt: None,
             connection_editor: None,
             add_connection_menu: None,
+            vpn_add_menu: None,
+            vpn_import_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -634,6 +720,12 @@ impl App {
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
         if let Some(action) = self.handle_connection_editor_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_vpn_import_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_vpn_add_menu_key(code, modifiers) {
             return action;
         }
         if let Some(action) = self.handle_add_connection_menu_key(code, modifiers) {
@@ -724,8 +816,7 @@ impl App {
             }
             _ => {
                 if let Some(field) = editor.focused_field() {
-                    if field.is_read_only(editor.is_new()) || field.is_choice() || field.is_toggle()
-                    {
+                    if field.is_read_only() || field.is_choice() || field.is_toggle() {
                         return Some(Action::Continue);
                     }
                     if let Some(input) = editor.focused_input_mut()
@@ -762,10 +853,98 @@ impl App {
             KeyCode::Enter => {
                 let kind = menu.selected_kind();
                 self.add_connection_menu = None;
-                self.open_new_connection_editor(kind);
+                if kind == NewConnectionKind::Vpn {
+                    self.open_vpn_add_menu();
+                } else {
+                    self.open_new_connection_editor(kind);
+                }
                 Some(Action::Continue)
             }
             _ => Some(Action::Continue),
+        }
+    }
+
+    fn handle_vpn_add_menu_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let menu = self.vpn_add_menu.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.vpn_add_menu = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                menu.move_selection(-1);
+                Some(Action::Continue)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.move_selection(1);
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let selected = menu.selected;
+                let plugins = menu.plugins.clone();
+                if menu.is_import(selected) {
+                    self.vpn_add_menu = None;
+                    self.vpn_import_prompt = Some(VpnImportPrompt::new(plugins));
+                    Some(Action::Continue)
+                } else if let Some(plugin) = plugins.get(selected).cloned() {
+                    self.vpn_add_menu = None;
+                    self.open_vpn_manual_editor(&plugin);
+                    Some(Action::Continue)
+                } else {
+                    Some(Action::Continue)
+                }
+            }
+            _ => Some(Action::Continue),
+        }
+    }
+
+    fn handle_vpn_import_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.vpn_import_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.vpn_import_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Left => {
+                prompt.cycle_plugin(false);
+                Some(Action::Continue)
+            }
+            KeyCode::Right => {
+                prompt.cycle_plugin(true);
+                Some(Action::Continue)
+            }
+            KeyCode::Char(' ') => {
+                prompt.activate_on_save = !prompt.activate_on_save;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let path = prompt.path.text().trim().to_owned();
+                if path.is_empty() {
+                    prompt.error = Some("File path is required.".into());
+                    return Some(Action::Continue);
+                }
+                let Some(plugin) = prompt.plugins.get(prompt.selected_plugin) else {
+                    prompt.error = Some("No VPN plugin selected.".into());
+                    return Some(Action::Continue);
+                };
+                Some(Action::ImportVpn {
+                    plugin_name: plugin.name.clone(),
+                    path,
+                    activate: prompt.activate_on_save,
+                })
+            }
+            _ => {
+                if prompt.path.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
         }
     }
 
@@ -867,6 +1046,11 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.vpn_import_prompt {
+            prompt.path.insert_str(text);
+            prompt.error = None;
+            return;
+        }
         if let Some(editor) = &mut self.connection_editor {
             if let Some(input) = editor.focused_input_mut() {
                 input.insert_str(text);
@@ -1104,6 +1288,65 @@ impl App {
         }
     }
 
+    fn open_vpn_add_menu(&mut self) {
+        let mut plugins = libnetman::vpn_plugins::list_installed_plugins();
+        if plugins.is_empty() {
+            plugins = demo_vpn_plugins();
+        }
+        if plugins.is_empty() {
+            self.status_message = Some("No VPN plugins installed.".into());
+            return;
+        }
+        self.vpn_add_menu = Some(VpnAddMenu {
+            plugins,
+            selected: 0,
+        });
+    }
+
+    fn open_vpn_manual_editor(&mut self, plugin: &libnetman::vpn_plugins::VpnPluginInfo) {
+        self.connection_editor = Some(ConnectionEditor::new_add(
+            plugin.label.clone(),
+            ConnectionProfile::Vpn(VpnProfile {
+                name: plugin.label.clone(),
+                service_type: plugin.service_type.clone(),
+                gateway: String::new(),
+                username: String::new(),
+                password: String::new(),
+                ipv4: Ipv4Profile::default(),
+            }),
+        ));
+    }
+
+    async fn on_import_vpn(&mut self, plugin_name: String, path: String, activate: bool) {
+        if self.demo_mode {
+            self.vpn_import_prompt = None;
+            self.status_message = Some("Demo mode — import not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.import_vpn_from_file(&plugin_name, &path, activate).await {
+                Ok(_) => {
+                    self.vpn_import_prompt = None;
+                    self.status_message = Some(if activate {
+                        "VPN imported. Activating…".into()
+                    } else {
+                        "VPN imported.".into()
+                    });
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.vpn_import_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = (plugin_name, path, activate);
+    }
+
     fn open_add_connection_menu(&mut self) -> Action {
         if self.demo_mode {
             self.add_connection_menu = Some(AddConnectionMenu::new());
@@ -1306,14 +1549,17 @@ impl EditorFieldId {
             Self::Mtu => "MTU",
             Self::ClonedMac => "Cloned MAC",
             Self::VpnServiceType => "VPN service",
+            Self::VpnGateway => "Gateway",
+            Self::VpnUsername => "Username",
+            Self::VpnPassword => "Password",
             Self::ConnectionName => "Name",
             Self::Activate => "Activate after save",
         }
     }
 
-    pub fn is_text(self, is_new: bool) -> bool {
+    pub fn is_text(self) -> bool {
         if self == Self::VpnServiceType {
-            return is_new;
+            return false;
         }
         matches!(
             self,
@@ -1326,12 +1572,14 @@ impl EditorFieldId {
                 | Self::Mtu
                 | Self::ClonedMac
                 | Self::ConnectionName
-                | Self::VpnServiceType
+                | Self::VpnGateway
+                | Self::VpnUsername
+                | Self::VpnPassword
         )
     }
 
     pub fn is_secret(self) -> bool {
-        self == Self::Password
+        matches!(self, Self::Password | Self::VpnPassword)
     }
 
     pub fn is_choice(self) -> bool {
@@ -1342,8 +1590,8 @@ impl EditorFieldId {
         matches!(self, Self::Hidden | Self::Activate)
     }
 
-    pub fn is_read_only(self, is_new: bool) -> bool {
-        self == Self::VpnServiceType && !is_new
+    pub fn is_read_only(self) -> bool {
+        self == Self::VpnServiceType
     }
 }
 
@@ -1373,6 +1621,9 @@ pub(crate) fn editor_fields_for(profile: &ConnectionProfile, is_new: bool) -> Ve
         ConnectionProfile::Vpn(_) => vec![
             EditorFieldId::ConnectionName,
             EditorFieldId::VpnServiceType,
+            EditorFieldId::VpnGateway,
+            EditorFieldId::VpnUsername,
+            EditorFieldId::VpnPassword,
             EditorFieldId::IpMethod,
             EditorFieldId::IpAddress,
             EditorFieldId::Prefix,
@@ -1417,7 +1668,9 @@ fn populate_inputs(
         }
         ConnectionProfile::Vpn(v) => {
             set(EditorFieldId::ConnectionName, &v.name);
-            set(EditorFieldId::VpnServiceType, &v.service_type);
+            set(EditorFieldId::VpnGateway, &v.gateway);
+            set(EditorFieldId::VpnUsername, &v.username);
+            set(EditorFieldId::VpnPassword, &v.password);
             set(EditorFieldId::IpAddress, &v.ipv4.address);
             set(EditorFieldId::Prefix, &v.ipv4.prefix.to_string());
             set(EditorFieldId::Gateway, &v.ipv4.gateway);
@@ -1450,7 +1703,9 @@ fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text:
         },
         ConnectionProfile::Vpn(v) => match field {
             EditorFieldId::ConnectionName => v.name = text.to_owned(),
-            EditorFieldId::VpnServiceType => v.service_type = text.to_owned(),
+            EditorFieldId::VpnGateway => v.gateway = text.to_owned(),
+            EditorFieldId::VpnUsername => v.username = text.to_owned(),
+            EditorFieldId::VpnPassword => v.password = text.to_owned(),
             EditorFieldId::IpAddress => v.ipv4.address = text.to_owned(),
             EditorFieldId::Prefix => v.ipv4.prefix = text.parse().unwrap_or(24),
             EditorFieldId::Gateway => v.ipv4.gateway = text.to_owned(),
@@ -1497,6 +1752,9 @@ fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
         ConnectionKind::Vpn(v) => ConnectionProfile::Vpn(VpnProfile {
             name: conn.id.clone(),
             service_type: v.service_type.clone(),
+            gateway: String::new(),
+            username: String::new(),
+            password: String::new(),
             ipv4: Ipv4Profile::default(),
         }),
         ConnectionKind::Loopback => ConnectionProfile::Unsupported {
@@ -1528,9 +1786,20 @@ fn blank_profile_for(kind: NewConnectionKind) -> ConnectionProfile {
         NewConnectionKind::Vpn => ConnectionProfile::Vpn(VpnProfile {
             name: "VPN".into(),
             service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+            gateway: String::new(),
+            username: String::new(),
+            password: String::new(),
             ipv4: Ipv4Profile::default(),
         }),
     }
+}
+
+fn demo_vpn_plugins() -> Vec<libnetman::vpn_plugins::VpnPluginInfo> {
+    vec![libnetman::vpn_plugins::VpnPluginInfo {
+        name: "openvpn".into(),
+        service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+        label: "OpenVPN".into(),
+    }]
 }
 
 // ── List building helpers ─────────────────────────────────────────────────────

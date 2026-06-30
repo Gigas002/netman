@@ -18,6 +18,7 @@
 
 pub mod connection;
 pub mod error;
+pub mod vpn_plugins;
 
 #[cfg(feature = "dbus")]
 pub mod nm;

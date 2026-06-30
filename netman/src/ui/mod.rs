@@ -14,6 +14,8 @@ mod hidden_network_prompt;
 mod password_prompt;
 mod status_bar;
 mod text_input;
+mod vpn_add_menu;
+mod vpn_import_prompt;
 
 #[cfg(test)]
 mod tests;
@@ -87,6 +89,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if let Some(menu) = &app.add_connection_menu {
         add_connection_menu::render(frame, area, menu);
+    }
+
+    if let Some(menu) = &app.vpn_add_menu {
+        vpn_add_menu::render(frame, area, menu);
+    }
+
+    if let Some(prompt) = &app.vpn_import_prompt {
+        vpn_import_prompt::render(frame, area, prompt);
     }
 
     if let Some(editor) = &app.connection_editor {

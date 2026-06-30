@@ -135,9 +135,13 @@ fn editor_fields_vary_by_connection_type() {
         &ConnectionProfile::Vpn(VpnProfile {
             name: "vpn".into(),
             service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+            gateway: String::new(),
+            username: String::new(),
+            password: String::new(),
             ipv4: Ipv4Profile::default(),
         }),
         false,
     );
+    assert!(vpn.contains(&EditorFieldId::VpnGateway));
     assert!(vpn.contains(&EditorFieldId::VpnServiceType));
 }

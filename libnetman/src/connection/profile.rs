@@ -104,6 +104,11 @@ pub struct VpnProfile {
     /// Connection display name (NM `connection.id`).
     pub name: String,
     pub service_type: String,
+    /// VPN gateway / remote host (plugin-specific; OpenVPN `remote`).
+    pub gateway: String,
+    pub username: String,
+    /// VPN password; stored in `vpn-secrets` when non-empty.
+    pub password: String,
     pub ipv4: Ipv4Profile,
 }
 
