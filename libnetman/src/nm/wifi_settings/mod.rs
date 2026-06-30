@@ -14,6 +14,7 @@ pub fn wifi_connection_settings(
     ssid: &str,
     security: WifiSecurity,
     password: Option<&str>,
+    hidden: bool,
 ) -> Result<HashMap<String, HashMap<String, OwnedValue>>> {
     if ssid.is_empty() {
         return Err(Error::OperationFailed("SSID must not be empty".into()));
@@ -51,6 +52,9 @@ pub fn wifi_connection_settings(
     let mut wireless = HashMap::new();
     wireless.insert("ssid".into(), bytes_value(ssid.as_bytes()));
     wireless.insert("mode".into(), str_value("infrastructure"));
+    if hidden {
+        wireless.insert("hidden".into(), bool_value(true));
+    }
     settings.insert("802-11-wireless".into(), wireless);
 
     if security.is_secured() {
@@ -89,6 +93,10 @@ fn bytes_value(bytes: &[u8]) -> OwnedValue {
     Value::from(bytes.to_vec())
         .try_into()
         .expect("bytes OwnedValue")
+}
+
+fn bool_value(value: bool) -> OwnedValue {
+    Value::from(value).try_into().expect("bool OwnedValue")
 }
 
 #[cfg(test)]

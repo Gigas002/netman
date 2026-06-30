@@ -48,19 +48,30 @@ fn build_list_items_groups_by_type() {
     ];
     let items = build_list_items(conns);
 
-    // First section: Wi-Fi header + 2 connections
+    // First section: Wi-Fi header + 2 connections + hidden entry
     assert!(matches!(&items[0], ListItem::Header(h) if h == "Wi-Fi"));
     assert!(items[1].is_connection());
     assert!(items[2].is_connection());
+    assert!(matches!(&items[3], ListItem::HiddenWifiConnect));
     // Second section: Ethernet header + 1 connection
-    assert!(matches!(&items[3], ListItem::Header(h) if h == "Ethernet"));
-    assert!(items[4].is_connection());
-    assert_eq!(items.len(), 5);
+    assert!(matches!(&items[4], ListItem::Header(h) if h == "Ethernet"));
+    assert!(items[5].is_connection());
+    assert_eq!(items.len(), 6);
 }
 
 #[test]
-fn build_list_items_empty_input() {
-    assert!(build_list_items(vec![]).is_empty());
+fn build_list_items_empty_input_includes_hidden_entry() {
+    let items = build_list_items(vec![]);
+    assert_eq!(items.len(), 2);
+    assert!(matches!(&items[0], ListItem::Header(h) if h == "Wi-Fi"));
+    assert!(matches!(&items[1], ListItem::HiddenWifiConnect));
+}
+
+#[test]
+fn hidden_wifi_entry_is_selectable() {
+    let items = build_list_items(vec![]);
+    assert!(items[1].is_selectable());
+    assert!(!items[1].is_connection());
 }
 
 #[test]

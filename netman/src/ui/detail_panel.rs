@@ -19,12 +19,30 @@ use crate::{
 
 /// Render the detail panel for the selected connection.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = match app.selected_conn() {
-        Some(conn) => build_lines(conn),
-        None => vec![Line::styled(
+    let lines = if app.selected_hidden_wifi() {
+        vec![
+            Line::from(Span::styled(
+                "  Connect to hidden network",
+                Style::default().fg(FG_ACCENT).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::styled(
+                "  Enter the SSID and password of a network that does not broadcast its name.",
+                Style::default().fg(FG_DIM),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "  Press Enter to open the connection dialog.",
+                Style::default().fg(FG_DIM),
+            ),
+        ]
+    } else if let Some(conn) = app.selected_conn() {
+        build_lines(conn)
+    } else {
+        vec![Line::styled(
             "  No connection selected",
             Style::default().fg(FG_DIM),
-        )],
+        )]
     };
 
     frame.render_widget(

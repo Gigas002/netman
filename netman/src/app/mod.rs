@@ -76,7 +76,8 @@ pub async fn run(settings: Settings) -> Result<()> {
                                         ssid,
                                         security,
                                         password,
-                                    } => app.on_connect_unsaved(ssid, security, password).await,
+                                        hidden,
+                                    } => app.on_connect_unsaved(ssid, security, password, hidden).await,
                                 }
                             }
                             Ok(Event::Paste(text)) => app.handle_paste(&text),
@@ -125,6 +126,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// Wi-Fi password overlay for connecting to unsaved networks.
     pub password_prompt: Option<PasswordPrompt>,
+    /// Hidden-network overlay (SSID + password).
+    pub hidden_network_prompt: Option<HiddenNetworkPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
@@ -148,6 +151,54 @@ impl PasswordPrompt {
             show_password: false,
             error: None,
         }
+    }
+}
+
+/// Active field in the hidden-network modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenPromptField {
+    Ssid,
+    Password,
+}
+
+/// State for the hidden Wi-Fi connection modal.
+pub struct HiddenNetworkPrompt {
+    pub ssid: TextInput,
+    pub password: TextInput,
+    pub focused: HiddenPromptField,
+    pub show_password: bool,
+    pub error: Option<String>,
+}
+
+impl Default for HiddenNetworkPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HiddenNetworkPrompt {
+    pub fn new() -> Self {
+        Self {
+            ssid: TextInput::new(),
+            password: TextInput::new(),
+            focused: HiddenPromptField::Ssid,
+            show_password: false,
+            error: None,
+        }
+    }
+
+    fn focused_input_mut(&mut self) -> &mut TextInput {
+        match self.focused {
+            HiddenPromptField::Ssid => &mut self.ssid,
+            HiddenPromptField::Password => &mut self.password,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.focused = match self.focused {
+            HiddenPromptField::Ssid => HiddenPromptField::Password,
+            HiddenPromptField::Password => HiddenPromptField::Ssid,
+        };
     }
 }
 
@@ -187,18 +238,23 @@ impl StateChangeWaiter {
 pub enum ListItem {
     Header(String),
     Connection(Connection),
+    HiddenWifiConnect,
 }
 
 impl ListItem {
     pub fn as_connection(&self) -> Option<&Connection> {
         match self {
             Self::Connection(c) => Some(c),
-            Self::Header(_) => None,
+            Self::Header(_) | Self::HiddenWifiConnect => None,
         }
     }
 
     pub fn is_connection(&self) -> bool {
         matches!(self, Self::Connection(_))
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Connection(_) | Self::HiddenWifiConnect)
     }
 }
 
@@ -215,6 +271,7 @@ enum Action {
         ssid: String,
         security: WifiSecurity,
         password: Option<String>,
+        hidden: bool,
     },
 }
 
@@ -239,6 +296,7 @@ impl App {
                         show_help: false,
                         status_message: None,
                         password_prompt: None,
+                        hidden_network_prompt: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -263,6 +321,7 @@ impl App {
             show_help: false,
             status_message: Some("Demo mode — NetworkManager not available".into()),
             password_prompt: None,
+            hidden_network_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -294,7 +353,7 @@ impl App {
             let connections = nm.connections().await?;
             self.items = build_list_items(connections);
             // Keep selection in bounds after refresh.
-            let conn_count = self.items.iter().filter(|i| i.is_connection()).count();
+            let conn_count = self.items.iter().filter(|i| i.is_selectable()).count();
             if conn_count > 0 {
                 self.selected = self.selected.min(conn_count - 1);
             }
@@ -305,6 +364,9 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        if let Some(action) = self.handle_hidden_network_key(code, modifiers) {
+            return action;
+        }
         if let Some(action) = self.handle_password_key(code, modifiers) {
             return action;
         }
@@ -336,6 +398,61 @@ impl App {
         Action::Continue
     }
 
+    fn handle_hidden_network_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let prompt = self.hidden_network_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.hidden_network_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                prompt.next_field();
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let ssid = prompt.ssid.text().trim().to_owned();
+                if ssid.is_empty() {
+                    prompt.error = Some("SSID is required.".into());
+                    prompt.focused = HiddenPromptField::Ssid;
+                    return Some(Action::Continue);
+                }
+                let password = prompt.password.text().to_owned();
+                let security = if password.is_empty() {
+                    WifiSecurity::None
+                } else {
+                    WifiSecurity::Wpa2
+                };
+                Some(Action::ConnectUnsaved {
+                    ssid,
+                    security,
+                    password: if password.is_empty() {
+                        None
+                    } else {
+                        Some(password)
+                    },
+                    hidden: true,
+                })
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                prompt.show_password = !prompt.show_password;
+                Some(Action::Continue)
+            }
+            _ => {
+                if prompt.focused_input_mut().handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
     fn handle_password_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         let prompt = self.password_prompt.as_mut()?;
 
@@ -360,6 +477,7 @@ impl App {
                     ssid,
                     security,
                     password,
+                    hidden: false,
                 })
             }
             KeyCode::Char('h') | KeyCode::Char('H')
@@ -378,6 +496,11 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.hidden_network_prompt {
+            prompt.focused_input_mut().insert_str(text);
+            prompt.error = None;
+            return;
+        }
         if let Some(prompt) = &mut self.password_prompt {
             prompt.input.insert_str(text);
             prompt.error = None;
@@ -388,7 +511,7 @@ impl App {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, i)| i.is_connection())
+            .filter(|(_, i)| i.is_selectable())
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -403,13 +526,32 @@ impl App {
         self.selected = new;
     }
 
-    fn selected_connection(&self) -> Option<&Connection> {
+    fn selected_list_item(&self) -> Option<&ListItem> {
         let indices = self.connection_indices();
         let item_idx = *indices.get(self.selected)?;
-        self.items[item_idx].as_connection()
+        self.items.get(item_idx)
+    }
+
+    fn selected_connection(&self) -> Option<&Connection> {
+        self.selected_list_item()?.as_connection()
     }
 
     fn connect_selected(&mut self) -> Action {
+        if matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect)) {
+            if !self.demo_mode {
+                if !self.networking_enabled {
+                    self.status_message = Some("Networking is disabled.".into());
+                    return Action::Continue;
+                }
+                if !self.wireless_enabled {
+                    self.status_message = Some("Wi-Fi is disabled.".into());
+                    return Action::Continue;
+                }
+            }
+            self.hidden_network_prompt = Some(HiddenNetworkPrompt::new());
+            return Action::Continue;
+        }
+
         if self.demo_mode {
             self.status_message = Some("Demo mode — connect not available".into());
             return Action::Continue;
@@ -450,6 +592,7 @@ impl App {
                 ssid: wifi.ssid.clone(),
                 security: wifi.security,
                 password: None,
+                hidden: false,
             };
         }
 
@@ -580,9 +723,11 @@ impl App {
         ssid: String,
         security: WifiSecurity,
         password: Option<String>,
+        hidden: bool,
     ) {
         if self.demo_mode {
             self.password_prompt = None;
+            self.hidden_network_prompt = None;
             self.status_message = Some("Demo mode — connect not available".into());
             return;
         }
@@ -590,15 +735,20 @@ impl App {
         #[cfg(feature = "dbus")]
         if let Some(nm) = &self.nm {
             match nm
-                .add_and_activate_wifi(&ssid, security, password.as_deref())
+                .add_and_activate_wifi(&ssid, security, password.as_deref(), hidden)
                 .await
             {
                 Ok(()) => {
                     self.password_prompt = None;
+                    self.hidden_network_prompt = None;
                     self.status_message = Some("Activating…".into());
                 }
                 Err(e) => {
-                    if password.is_some() {
+                    if hidden {
+                        if let Some(prompt) = &mut self.hidden_network_prompt {
+                            prompt.error = Some(e.to_string());
+                        }
+                    } else if password.is_some() {
                         if let Some(prompt) = &mut self.password_prompt {
                             prompt.error = Some(e.to_string());
                         }
@@ -610,7 +760,7 @@ impl App {
             }
         }
         #[cfg(not(feature = "dbus"))]
-        let _ = (ssid, security, password);
+        let _ = (ssid, security, password, hidden);
     }
 
     #[cfg(feature = "dbus")]
@@ -674,10 +824,9 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
 
     let mut items = Vec::new();
 
-    if !wifi.is_empty() {
-        items.push(ListItem::Header("Wi-Fi".into()));
-        items.extend(wifi.into_iter().map(ListItem::Connection));
-    }
+    items.push(ListItem::Header("Wi-Fi".into()));
+    items.extend(wifi.into_iter().map(ListItem::Connection));
+    items.push(ListItem::HiddenWifiConnect);
     if !ethernet.is_empty() {
         items.push(ListItem::Header("Ethernet".into()));
         items.extend(ethernet.into_iter().map(ListItem::Connection));
@@ -797,6 +946,10 @@ fn demo_connections() -> Vec<ListItem> {
 impl App {
     pub fn selected_conn(&self) -> Option<&Connection> {
         self.selected_connection()
+    }
+
+    pub fn selected_hidden_wifi(&self) -> bool {
+        matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect))
     }
 }
 

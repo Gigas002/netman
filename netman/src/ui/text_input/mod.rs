@@ -49,6 +49,36 @@ impl TextInput {
         }
     }
 
+    /// Build a one-line ratatui row for this input field.
+    pub fn render_line(&self, revealed: bool, width: u16) -> ratatui::text::Line<'static> {
+        use ratatui::style::{Modifier, Style};
+        use ratatui::text::{Line, Span};
+
+        let field_width = width.saturating_sub(6) as usize;
+        let display = self.display_text(revealed);
+        let truncated = truncate_display(&display, field_width);
+        let cursor_col = self.cursor_char_index().min(field_width.saturating_sub(1));
+
+        let mut spans = vec![Span::raw("  ")];
+        for (idx, ch) in truncated.chars().enumerate() {
+            let style = if idx == cursor_col {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+
+        if truncated.is_empty() {
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
     /// Handle a key event. Returns `true` if the key was consumed.
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if modifiers.contains(KeyModifiers::CONTROL) {
@@ -117,6 +147,15 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
         .nth(1)
         .map(|(offset, _)| cursor + offset)
         .unwrap_or(text.len())
+}
+
+fn truncate_display(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        text.to_owned()
+    } else {
+        chars[..max_chars].iter().collect()
+    }
 }
 
 #[cfg(test)]

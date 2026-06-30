@@ -166,10 +166,11 @@ impl NmClient {
         ssid: &str,
         security: WifiSecurity,
         password: Option<&str>,
+        hidden: bool,
     ) -> Result<()> {
         use wifi_settings::wifi_connection_settings;
 
-        let settings = wifi_connection_settings(ssid, security, password)?;
+        let settings = wifi_connection_settings(ssid, security, password, hidden)?;
         let device = self.find_wireless_path().await?;
         let nm = NetworkManagerProxy::new(&self.conn).await?;
         nm.add_and_activate_connection(settings, device.as_str(), "/")

@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .items
         .iter()
         .enumerate()
-        .filter(|(_, i)| i.is_connection())
+        .filter(|(_, i)| i.is_selectable())
         .map(|(idx, _)| idx)
         .collect();
 
@@ -58,6 +58,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             AppListItem::Connection(conn) => {
                 let is_selected = Some(idx) == selected_item_idx;
                 build_connection_row(conn, is_selected, app)
+            }
+            AppListItem::HiddenWifiConnect => {
+                let style = if Some(idx) == selected_item_idx {
+                    Style::default().fg(FG_ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(FG_ACCENT)
+                };
+                ListItem::new(Line::from(Span::styled(" [ Connect to hidden… ]", style)))
             }
         })
         .collect();

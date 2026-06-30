@@ -5,14 +5,14 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use crate::{
     app::PasswordPrompt,
-    ui::{FG_ACCENT, FG_DIM, FG_WARN, TextInput},
+    ui::{FG_ACCENT, FG_DIM, FG_WARN},
 };
 
 /// Render the password prompt overlay when active.
@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, area: Rect, prompt: &PasswordPrompt) {
         ]),
         Line::raw(""),
         Line::from(Span::styled("  Password", Style::default().fg(FG_DIM))),
-        render_input_line(&prompt.input, prompt.show_password, width),
+        prompt.input.render_line(prompt.show_password, width),
     ];
 
     if let Some(err) = &prompt.error {
@@ -65,39 +65,4 @@ pub fn render(frame: &mut Frame, area: Rect, prompt: &PasswordPrompt) {
         ),
         overlay,
     );
-}
-
-fn render_input_line(input: &TextInput, revealed: bool, width: u16) -> Line<'static> {
-    let field_width = width.saturating_sub(6) as usize;
-    let display = input.display_text(revealed);
-    let truncated = truncate_display(&display, field_width);
-    let cursor_col = input.cursor_char_index().min(field_width.saturating_sub(1));
-
-    let mut spans = vec![Span::raw("  ")];
-    for (idx, ch) in truncated.chars().enumerate() {
-        let style = if idx == cursor_col {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(ch.to_string(), style));
-    }
-
-    if truncated.is_empty() {
-        spans.push(Span::styled(
-            " ",
-            Style::default().add_modifier(Modifier::REVERSED),
-        ));
-    }
-
-    Line::from(spans)
-}
-
-fn truncate_display(text: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        text.to_owned()
-    } else {
-        chars[..max_chars].iter().collect()
-    }
 }

@@ -8,6 +8,7 @@
 
 mod connection_list;
 mod detail_panel;
+mod hidden_network_prompt;
 mod password_prompt;
 mod status_bar;
 mod text_input;
@@ -76,6 +77,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     if let Some(prompt) = &app.password_prompt {
         password_prompt::render(frame, area, prompt);
+    }
+
+    if let Some(prompt) = &app.hidden_network_prompt {
+        hidden_network_prompt::render(frame, area, prompt);
     }
 }
 
