@@ -16,7 +16,7 @@ use crossterm::{
 };
 use libnetman::connection::{
     Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile, Ipv4Profile,
-    NmState, VpnProfile, WifiProfile, WifiSecurity,
+    Ipv6Profile, NmState, VpnProfile, WifiProfile, WifiSecurity,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -249,17 +249,27 @@ pub enum EditorFieldId {
     Security,
     Password,
     Hidden,
+    Autoconnect,
+    VpnSecondary,
     IpMethod,
     IpAddress,
     Prefix,
     Gateway,
     Dns,
+    Ip6Method,
+    Ip6Address,
+    Ip6Prefix,
+    Ip6Gateway,
+    Ip6Dns,
     Mtu,
     ClonedMac,
     VpnServiceType,
     VpnGateway,
     VpnUsername,
     VpnPassword,
+    VpnPort,
+    VpnProtocol,
+    VpnGroup,
     ConnectionName,
     Activate,
 }
@@ -396,13 +406,19 @@ pub struct ConnectionEditor {
     pub fields: Vec<EditorFieldId>,
     pub focused: usize,
     pub inputs: std::collections::HashMap<EditorFieldId, TextInput>,
+    pub vpn_choices: Vec<(String, String)>,
     pub show_secrets: bool,
     pub activate_on_save: bool,
     pub error: Option<String>,
 }
 
 impl ConnectionEditor {
-    pub fn edit(uuid: String, title: String, profile: ConnectionProfile) -> Self {
+    pub fn edit(
+        uuid: String,
+        title: String,
+        profile: ConnectionProfile,
+        vpn_choices: Vec<(String, String)>,
+    ) -> Self {
         let fields = editor_fields_for(&profile, false);
         let mut inputs = std::collections::HashMap::new();
         populate_inputs(&mut inputs, &profile);
@@ -414,13 +430,18 @@ impl ConnectionEditor {
             fields,
             focused: 0,
             inputs,
+            vpn_choices,
             show_secrets: false,
             activate_on_save: false,
             error: None,
         }
     }
 
-    pub fn new_add(title: String, profile: ConnectionProfile) -> Self {
+    pub fn new_add(
+        title: String,
+        profile: ConnectionProfile,
+        vpn_choices: Vec<(String, String)>,
+    ) -> Self {
         let fields = editor_fields_for(&profile, true);
         let mut inputs = std::collections::HashMap::new();
         populate_inputs(&mut inputs, &profile);
@@ -432,6 +453,7 @@ impl ConnectionEditor {
             fields,
             focused: 0,
             inputs,
+            vpn_choices,
             show_secrets: false,
             activate_on_save: true,
             error: None,
@@ -509,16 +531,63 @@ impl ConnectionEditor {
                     };
                 }
             }
-            EditorFieldId::Hidden => {
-                if let ConnectionProfile::Wifi(w) = &mut self.profile {
-                    w.hidden = !w.hidden;
+            EditorFieldId::Ip6Method => {
+                if let Some(ipv6) = profile_ipv6_mut(&mut self.profile) {
+                    ipv6.method = if forward {
+                        ipv6.method.next()
+                    } else {
+                        ipv6.method.prev()
+                    };
                 }
             }
+            EditorFieldId::VpnSecondary => self.cycle_vpn_secondary(forward),
+            EditorFieldId::VpnProtocol => {
+                if let ConnectionProfile::Vpn(v) = &mut self.profile {
+                    v.protocol = if v.protocol.eq_ignore_ascii_case("tcp") {
+                        "udp".into()
+                    } else {
+                        "tcp".into()
+                    };
+                }
+            }
+            EditorFieldId::Hidden | EditorFieldId::Autoconnect => match &mut self.profile {
+                ConnectionProfile::Wifi(w) if matches!(field, EditorFieldId::Hidden) => {
+                    w.hidden = !w.hidden;
+                }
+                ConnectionProfile::Wifi(w) if matches!(field, EditorFieldId::Autoconnect) => {
+                    w.autoconnect = !w.autoconnect;
+                }
+                ConnectionProfile::Ethernet(e) => {
+                    e.autoconnect = !e.autoconnect;
+                }
+                _ => {}
+            },
             EditorFieldId::Activate => {
                 self.activate_on_save = !self.activate_on_save;
             }
             _ => {}
         }
+    }
+
+    fn cycle_vpn_secondary(&mut self, forward: bool) {
+        let choices_len = 1 + self.vpn_choices.len();
+        if choices_len <= 1 {
+            set_vpn_secondary(&mut self.profile, None);
+            return;
+        }
+
+        let current_idx = vpn_secondary_index(&self.profile, &self.vpn_choices);
+        let next_idx = if forward {
+            (current_idx + 1) % choices_len
+        } else {
+            (current_idx + choices_len - 1) % choices_len
+        };
+        let secondary = if next_idx == 0 {
+            None
+        } else {
+            Some(self.vpn_choices[next_idx - 1].0.clone())
+        };
+        set_vpn_secondary(&mut self.profile, secondary);
     }
 
     fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
@@ -542,9 +611,21 @@ impl ConnectionEditor {
                     String::new()
                 }
             }
+            EditorFieldId::Autoconnect => link_autoconnect_label(&self.profile),
+            EditorFieldId::VpnSecondary => vpn_secondary_label(&self.profile, &self.vpn_choices),
             EditorFieldId::IpMethod => profile_ipv4_ref(&self.profile)
                 .map(|ip| ip.method.label().to_owned())
                 .unwrap_or_default(),
+            EditorFieldId::Ip6Method => profile_ipv6_ref(&self.profile)
+                .map(|ip| ip.method.label().to_owned())
+                .unwrap_or_default(),
+            EditorFieldId::VpnProtocol => {
+                if let ConnectionProfile::Vpn(v) = &self.profile {
+                    v.protocol.to_ascii_uppercase()
+                } else {
+                    String::new()
+                }
+            }
             EditorFieldId::VpnServiceType => {
                 if let ConnectionProfile::Vpn(v) = &self.profile {
                     v.service_type.clone()
@@ -849,7 +930,9 @@ impl App {
             KeyCode::Char(' ') => {
                 if matches!(
                     editor.focused_field(),
-                    Some(EditorFieldId::Hidden) | Some(EditorFieldId::Activate)
+                    Some(EditorFieldId::Hidden)
+                        | Some(EditorFieldId::Activate)
+                        | Some(EditorFieldId::Autoconnect)
                 ) {
                     editor.cycle_choice(true);
                 } else if let Some(input) = editor.focused_input_mut() {
@@ -1308,6 +1391,7 @@ impl App {
                 conn.uuid.clone(),
                 conn.label().to_owned(),
                 profile,
+                self.vpn_choices(),
             ));
             return Action::Continue;
         }
@@ -1328,7 +1412,12 @@ impl App {
                         .selected_connection()
                         .map(|c| c.label().to_owned())
                         .unwrap_or_else(|| uuid.clone());
-                    self.connection_editor = Some(ConnectionEditor::edit(uuid, title, profile));
+                    self.connection_editor = Some(ConnectionEditor::edit(
+                        uuid,
+                        title,
+                        profile,
+                        self.vpn_choices(),
+                    ));
                 }
                 Err(e) => self.status_message = Some(format!("Load failed: {e}")),
             }
@@ -1405,11 +1494,9 @@ impl App {
             ConnectionProfile::Vpn(VpnProfile {
                 name: plugin.label.clone(),
                 service_type: plugin.service_type.clone(),
-                gateway: String::new(),
-                username: String::new(),
-                password: String::new(),
-                ipv4: Ipv4Profile::default(),
+                ..VpnProfile::default()
             }),
+            self.vpn_choices(),
         ));
     }
 
@@ -1459,7 +1546,11 @@ impl App {
     fn open_new_connection_editor(&mut self, kind: NewConnectionKind) {
         let profile = blank_profile_for(kind);
         let title = kind.label().to_owned();
-        self.connection_editor = Some(ConnectionEditor::new_add(title, profile));
+        self.connection_editor = Some(ConnectionEditor::new_add(
+            title,
+            profile,
+            self.vpn_choices(),
+        ));
     }
 
     async fn on_activate(&mut self, uuid: &str) {
@@ -1634,17 +1725,27 @@ impl EditorFieldId {
             Self::Security => "Security",
             Self::Password => "Password",
             Self::Hidden => "Hidden network",
+            Self::Autoconnect => "Connect automatically",
+            Self::VpnSecondary => "Auto-connect VPN",
             Self::IpMethod => "IPv4 method",
             Self::IpAddress => "IPv4 address",
-            Self::Prefix => "Prefix length",
-            Self::Gateway => "Gateway",
-            Self::Dns => "DNS",
+            Self::Prefix => "IPv4 prefix",
+            Self::Gateway => "IPv4 gateway",
+            Self::Dns => "IPv4 DNS",
+            Self::Ip6Method => "IPv6 method",
+            Self::Ip6Address => "IPv6 address",
+            Self::Ip6Prefix => "IPv6 prefix",
+            Self::Ip6Gateway => "IPv6 gateway",
+            Self::Ip6Dns => "IPv6 DNS",
             Self::Mtu => "MTU",
             Self::ClonedMac => "Cloned MAC",
             Self::VpnServiceType => "VPN service",
             Self::VpnGateway => "Gateway",
             Self::VpnUsername => "Username",
             Self::VpnPassword => "Password",
+            Self::VpnPort => "Port",
+            Self::VpnProtocol => "Protocol",
+            Self::VpnGroup => "Group",
             Self::ConnectionName => "Name",
             Self::Activate => "Activate after save",
         }
@@ -1662,12 +1763,18 @@ impl EditorFieldId {
                 | Self::Prefix
                 | Self::Gateway
                 | Self::Dns
+                | Self::Ip6Address
+                | Self::Ip6Prefix
+                | Self::Ip6Gateway
+                | Self::Ip6Dns
                 | Self::Mtu
                 | Self::ClonedMac
                 | Self::ConnectionName
                 | Self::VpnGateway
                 | Self::VpnUsername
                 | Self::VpnPassword
+                | Self::VpnPort
+                | Self::VpnGroup
         )
     }
 
@@ -1676,11 +1783,18 @@ impl EditorFieldId {
     }
 
     pub fn is_choice(self) -> bool {
-        matches!(self, Self::Security | Self::IpMethod)
+        matches!(
+            self,
+            Self::Security
+                | Self::IpMethod
+                | Self::Ip6Method
+                | Self::VpnSecondary
+                | Self::VpnProtocol
+        )
     }
 
     pub fn is_toggle(self) -> bool {
-        matches!(self, Self::Hidden | Self::Activate)
+        matches!(self, Self::Hidden | Self::Activate | Self::Autoconnect)
     }
 
     pub fn is_read_only(self) -> bool {
@@ -1688,47 +1802,98 @@ impl EditorFieldId {
     }
 }
 
+fn ipv4_editor_fields() -> Vec<EditorFieldId> {
+    vec![
+        EditorFieldId::IpMethod,
+        EditorFieldId::IpAddress,
+        EditorFieldId::Prefix,
+        EditorFieldId::Gateway,
+        EditorFieldId::Dns,
+    ]
+}
+
+fn ipv6_editor_fields() -> Vec<EditorFieldId> {
+    vec![
+        EditorFieldId::Ip6Method,
+        EditorFieldId::Ip6Address,
+        EditorFieldId::Ip6Prefix,
+        EditorFieldId::Ip6Gateway,
+        EditorFieldId::Ip6Dns,
+    ]
+}
+
+fn link_editor_fields() -> Vec<EditorFieldId> {
+    vec![EditorFieldId::Autoconnect, EditorFieldId::VpnSecondary]
+}
+
+fn vpn_extra_editor_fields(service_type: &str) -> Vec<EditorFieldId> {
+    let mut fields = Vec::new();
+    if service_type.contains("openvpn") {
+        fields.push(EditorFieldId::VpnPort);
+        fields.push(EditorFieldId::VpnProtocol);
+    }
+    if service_type.contains("vpnc") {
+        fields.push(EditorFieldId::VpnGroup);
+    }
+    fields
+}
+
 pub(crate) fn editor_fields_for(profile: &ConnectionProfile, is_new: bool) -> Vec<EditorFieldId> {
     let mut fields = match profile {
-        ConnectionProfile::Wifi(_) => vec![
-            EditorFieldId::Ssid,
-            EditorFieldId::Security,
-            EditorFieldId::Password,
-            EditorFieldId::Hidden,
-            EditorFieldId::IpMethod,
-            EditorFieldId::IpAddress,
-            EditorFieldId::Prefix,
-            EditorFieldId::Gateway,
-            EditorFieldId::Dns,
-        ],
-        ConnectionProfile::Ethernet(_) => vec![
-            EditorFieldId::ConnectionName,
-            EditorFieldId::IpMethod,
-            EditorFieldId::IpAddress,
-            EditorFieldId::Prefix,
-            EditorFieldId::Gateway,
-            EditorFieldId::Dns,
-            EditorFieldId::Mtu,
-            EditorFieldId::ClonedMac,
-        ],
-        ConnectionProfile::Vpn(_) => vec![
-            EditorFieldId::ConnectionName,
-            EditorFieldId::VpnServiceType,
-            EditorFieldId::VpnGateway,
-            EditorFieldId::VpnUsername,
-            EditorFieldId::VpnPassword,
-            EditorFieldId::IpMethod,
-            EditorFieldId::IpAddress,
-            EditorFieldId::Prefix,
-            EditorFieldId::Gateway,
-            EditorFieldId::Dns,
-        ],
+        ConnectionProfile::Wifi(_) => {
+            let mut wifi_fields = vec![
+                EditorFieldId::Ssid,
+                EditorFieldId::Security,
+                EditorFieldId::Password,
+                EditorFieldId::Hidden,
+            ];
+            wifi_fields.extend(link_editor_fields());
+            wifi_fields.extend(ipv4_editor_fields());
+            wifi_fields.extend(ipv6_editor_fields());
+            wifi_fields
+        }
+        ConnectionProfile::Ethernet(_) => {
+            let mut eth_fields = vec![EditorFieldId::ConnectionName];
+            eth_fields.extend(link_editor_fields());
+            eth_fields.extend(ipv4_editor_fields());
+            eth_fields.extend(ipv6_editor_fields());
+            eth_fields.push(EditorFieldId::Mtu);
+            eth_fields.push(EditorFieldId::ClonedMac);
+            eth_fields
+        }
+        ConnectionProfile::Vpn(v) => {
+            let mut vpn_fields = vec![
+                EditorFieldId::ConnectionName,
+                EditorFieldId::VpnServiceType,
+                EditorFieldId::VpnGateway,
+                EditorFieldId::VpnUsername,
+                EditorFieldId::VpnPassword,
+            ];
+            vpn_fields.extend(vpn_extra_editor_fields(&v.service_type));
+            vpn_fields.extend(ipv4_editor_fields());
+            vpn_fields.extend(ipv6_editor_fields());
+            vpn_fields
+        }
         ConnectionProfile::Unsupported { .. } => vec![],
     };
     if is_new {
         fields.push(EditorFieldId::Activate);
     }
     fields
+}
+
+fn populate_ip_inputs<F>(set: &mut F, ipv4: &Ipv4Profile, ipv6: &Ipv6Profile)
+where
+    F: FnMut(EditorFieldId, &str),
+{
+    set(EditorFieldId::IpAddress, &ipv4.address);
+    set(EditorFieldId::Prefix, &ipv4.prefix.to_string());
+    set(EditorFieldId::Gateway, &ipv4.gateway);
+    set(EditorFieldId::Dns, &ipv4.dns);
+    set(EditorFieldId::Ip6Address, &ipv6.address);
+    set(EditorFieldId::Ip6Prefix, &ipv6.prefix.to_string());
+    set(EditorFieldId::Ip6Gateway, &ipv6.gateway);
+    set(EditorFieldId::Ip6Dns, &ipv6.dns);
 }
 
 fn populate_inputs(
@@ -1745,17 +1910,11 @@ fn populate_inputs(
         ConnectionProfile::Wifi(w) => {
             set(EditorFieldId::Ssid, &w.ssid);
             set(EditorFieldId::Password, &w.psk);
-            set(EditorFieldId::IpAddress, &w.ipv4.address);
-            set(EditorFieldId::Prefix, &w.ipv4.prefix.to_string());
-            set(EditorFieldId::Gateway, &w.ipv4.gateway);
-            set(EditorFieldId::Dns, &w.ipv4.dns);
+            populate_ip_inputs(&mut set, &w.ipv4, &w.ipv6);
         }
         ConnectionProfile::Ethernet(e) => {
             set(EditorFieldId::ConnectionName, &e.name);
-            set(EditorFieldId::IpAddress, &e.ipv4.address);
-            set(EditorFieldId::Prefix, &e.ipv4.prefix.to_string());
-            set(EditorFieldId::Gateway, &e.ipv4.gateway);
-            set(EditorFieldId::Dns, &e.ipv4.dns);
+            populate_ip_inputs(&mut set, &e.ipv4, &e.ipv6);
             set(EditorFieldId::Mtu, &e.mtu);
             set(EditorFieldId::ClonedMac, &e.cloned_mac);
         }
@@ -1764,10 +1923,9 @@ fn populate_inputs(
             set(EditorFieldId::VpnGateway, &v.gateway);
             set(EditorFieldId::VpnUsername, &v.username);
             set(EditorFieldId::VpnPassword, &v.password);
-            set(EditorFieldId::IpAddress, &v.ipv4.address);
-            set(EditorFieldId::Prefix, &v.ipv4.prefix.to_string());
-            set(EditorFieldId::Gateway, &v.ipv4.gateway);
-            set(EditorFieldId::Dns, &v.ipv4.dns);
+            set(EditorFieldId::VpnPort, &v.port);
+            set(EditorFieldId::VpnGroup, &v.group_name);
+            populate_ip_inputs(&mut set, &v.ipv4, &v.ipv6);
         }
         ConnectionProfile::Unsupported { .. } => {}
     }
@@ -1782,6 +1940,10 @@ fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text:
             EditorFieldId::Prefix => w.ipv4.prefix = text.parse().unwrap_or(24),
             EditorFieldId::Gateway => w.ipv4.gateway = text.to_owned(),
             EditorFieldId::Dns => w.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => w.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => w.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => w.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => w.ipv6.dns = text.to_owned(),
             _ => {}
         },
         ConnectionProfile::Ethernet(e) => match field {
@@ -1790,6 +1952,10 @@ fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text:
             EditorFieldId::Prefix => e.ipv4.prefix = text.parse().unwrap_or(24),
             EditorFieldId::Gateway => e.ipv4.gateway = text.to_owned(),
             EditorFieldId::Dns => e.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => e.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => e.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => e.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => e.ipv6.dns = text.to_owned(),
             EditorFieldId::Mtu => e.mtu = text.to_owned(),
             EditorFieldId::ClonedMac => e.cloned_mac = text.to_owned(),
             _ => {}
@@ -1799,10 +1965,16 @@ fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text:
             EditorFieldId::VpnGateway => v.gateway = text.to_owned(),
             EditorFieldId::VpnUsername => v.username = text.to_owned(),
             EditorFieldId::VpnPassword => v.password = text.to_owned(),
+            EditorFieldId::VpnPort => v.port = text.to_owned(),
+            EditorFieldId::VpnGroup => v.group_name = text.to_owned(),
             EditorFieldId::IpAddress => v.ipv4.address = text.to_owned(),
             EditorFieldId::Prefix => v.ipv4.prefix = text.parse().unwrap_or(24),
             EditorFieldId::Gateway => v.ipv4.gateway = text.to_owned(),
             EditorFieldId::Dns => v.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => v.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => v.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => v.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => v.ipv6.dns = text.to_owned(),
             _ => {}
         },
         ConnectionProfile::Unsupported { .. } => {}
@@ -1827,6 +1999,73 @@ fn profile_ipv4_ref(profile: &ConnectionProfile) -> Option<&Ipv4Profile> {
     }
 }
 
+fn profile_ipv6_mut(profile: &mut ConnectionProfile) -> Option<&mut Ipv6Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&mut w.ipv6),
+        ConnectionProfile::Ethernet(e) => Some(&mut e.ipv6),
+        ConnectionProfile::Vpn(v) => Some(&mut v.ipv6),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn profile_ipv6_ref(profile: &ConnectionProfile) -> Option<&Ipv6Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&w.ipv6),
+        ConnectionProfile::Ethernet(e) => Some(&e.ipv6),
+        ConnectionProfile::Vpn(v) => Some(&v.ipv6),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn link_autoconnect_label(profile: &ConnectionProfile) -> String {
+    let enabled = match profile {
+        ConnectionProfile::Wifi(w) => w.autoconnect,
+        ConnectionProfile::Ethernet(e) => e.autoconnect,
+        _ => return String::new(),
+    };
+    if enabled { "yes" } else { "no" }.to_owned()
+}
+
+fn vpn_secondary_label(profile: &ConnectionProfile, choices: &[(String, String)]) -> String {
+    let uuid = match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary.as_deref(),
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary.as_deref(),
+        _ => return "(none)".into(),
+    };
+    let Some(uuid) = uuid else {
+        return "(none)".into();
+    };
+    choices
+        .iter()
+        .find(|(id, _)| id == uuid)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| uuid.to_owned())
+}
+
+fn vpn_secondary_index(profile: &ConnectionProfile, choices: &[(String, String)]) -> usize {
+    let uuid = match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary.as_deref(),
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary.as_deref(),
+        _ => return 0,
+    };
+    let Some(uuid) = uuid else {
+        return 0;
+    };
+    choices
+        .iter()
+        .position(|(id, _)| id == uuid)
+        .map(|idx| idx + 1)
+        .unwrap_or(0)
+}
+
+fn set_vpn_secondary(profile: &mut ConnectionProfile, secondary: Option<String>) {
+    match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary = secondary,
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary = secondary,
+        _ => {}
+    }
+}
+
 fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
     match &conn.kind {
         ConnectionKind::Wifi(w) => ConnectionProfile::Wifi(WifiProfile {
@@ -1834,21 +2073,24 @@ fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
             security: w.security,
             psk: String::new(),
             hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
         }),
         ConnectionKind::Ethernet => ConnectionProfile::Ethernet(EthernetProfile {
             name: conn.id.clone(),
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
             mtu: String::new(),
             cloned_mac: String::new(),
         }),
         ConnectionKind::Vpn(v) => ConnectionProfile::Vpn(VpnProfile {
             name: conn.id.clone(),
             service_type: v.service_type.clone(),
-            gateway: String::new(),
-            username: String::new(),
-            password: String::new(),
-            ipv4: Ipv4Profile::default(),
+            ..VpnProfile::default()
         }),
         ConnectionKind::Loopback => ConnectionProfile::Unsupported {
             id: conn.id.clone(),
@@ -1868,21 +2110,24 @@ fn blank_profile_for(kind: NewConnectionKind) -> ConnectionProfile {
             security: WifiSecurity::Wpa2,
             psk: String::new(),
             hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
         }),
         NewConnectionKind::Ethernet => ConnectionProfile::Ethernet(EthernetProfile {
             name: "Wired connection".into(),
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
             mtu: String::new(),
             cloned_mac: String::new(),
         }),
         NewConnectionKind::Vpn => ConnectionProfile::Vpn(VpnProfile {
             name: "VPN".into(),
             service_type: "org.freedesktop.NetworkManager.openvpn".into(),
-            gateway: String::new(),
-            username: String::new(),
-            password: String::new(),
-            ipv4: Ipv4Profile::default(),
+            ..VpnProfile::default()
         }),
     }
 }
@@ -2064,6 +2309,15 @@ impl App {
 
     pub fn selected_hidden_wifi(&self) -> bool {
         matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect))
+    }
+
+    fn vpn_choices(&self) -> Vec<(String, String)> {
+        self.items
+            .iter()
+            .filter_map(|item| item.as_connection())
+            .filter(|conn| conn.saved && matches!(conn.kind, ConnectionKind::Vpn(_)))
+            .map(|conn| (conn.uuid.clone(), conn.id.clone()))
+            .collect()
     }
 }
 

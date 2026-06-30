@@ -6,7 +6,8 @@ use zbus::zvariant::{OwnedValue, Value};
 
 use super::{apply_profile, parse_profile, profile_to_settings};
 use crate::connection::{
-    ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, WifiProfile, WifiSecurity,
+    ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, Ipv6Profile, WifiProfile,
+    WifiSecurity,
 };
 
 fn str_value(s: &str) -> OwnedValue {
@@ -116,10 +117,13 @@ fn manual_ipv4_requires_address() {
         security: WifiSecurity::Wpa2,
         psk: String::new(),
         hidden: false,
+        autoconnect: true,
+        vpn_secondary: None,
         ipv4: Ipv4Profile {
             method: IpMethod::Manual,
             ..Ipv4Profile::default()
         },
+        ipv6: Ipv6Profile::default(),
     });
     assert!(apply_profile(&raw, &profile).is_err());
 }
@@ -139,7 +143,10 @@ fn ethernet_round_trip_mtu() {
 
     let profile = ConnectionProfile::Ethernet(EthernetProfile {
         name: "Wired".into(),
+        autoconnect: true,
+        vpn_secondary: None,
         ipv4: Ipv4Profile::default(),
+        ipv6: Ipv6Profile::default(),
         mtu: "1500".into(),
         cloned_mac: String::new(),
     });
@@ -158,7 +165,10 @@ fn profile_to_settings_builds_new_wifi() {
         security: WifiSecurity::Wpa2,
         psk: "secret".into(),
         hidden: false,
+        autoconnect: true,
+        vpn_secondary: None,
         ipv4: Ipv4Profile::default(),
+        ipv6: Ipv6Profile::default(),
     });
     let settings = profile_to_settings(&profile).unwrap();
     let reparsed = parse_profile(&settings, None);
@@ -170,13 +180,58 @@ fn profile_to_settings_builds_new_wifi() {
 }
 
 #[test]
+fn ipv6_and_autoconnect_round_trip() {
+    let mut settings = wifi_raw();
+    settings
+        .get_mut("connection")
+        .unwrap()
+        .insert("autoconnect".into(), Value::from(false).try_into().unwrap());
+    settings.get_mut("connection").unwrap().insert(
+        "secondaries".into(),
+        Value::from(vec!["vpn-uuid".to_owned()]).try_into().unwrap(),
+    );
+    let mut ipv6 = HashMap::new();
+    ipv6.insert("method".into(), str_value("manual"));
+    let mut addr_entry: HashMap<String, OwnedValue> = HashMap::new();
+    addr_entry.insert("address".into(), str_value("2001:db8::1"));
+    addr_entry.insert("prefix".into(), Value::from(64u32).try_into().unwrap());
+    ipv6.insert(
+        "address-data".into(),
+        Value::from(vec![addr_entry]).try_into().unwrap(),
+    );
+    settings.insert("ipv6".into(), ipv6);
+
+    let profile = parse_profile(&settings, None);
+    let ConnectionProfile::Wifi(w) = profile else {
+        panic!("expected wifi");
+    };
+    assert!(!w.autoconnect);
+    assert_eq!(w.vpn_secondary.as_deref(), Some("vpn-uuid"));
+    assert_eq!(w.ipv6.method, IpMethod::Manual);
+    assert_eq!(w.ipv6.address, "2001:db8::1");
+    assert_eq!(w.ipv6.prefix, 64);
+
+    let updated = apply_profile(&settings, &ConnectionProfile::Wifi(w)).unwrap();
+    let reparsed = parse_profile(&updated, None);
+    let ConnectionProfile::Wifi(w2) = reparsed else {
+        panic!("expected wifi");
+    };
+    assert!(!w2.autoconnect);
+    assert_eq!(w2.vpn_secondary.as_deref(), Some("vpn-uuid"));
+    assert_eq!(w2.ipv6.address, "2001:db8::1");
+}
+
+#[test]
 fn profile_to_settings_rejects_secured_wifi_without_password() {
     let profile = ConnectionProfile::Wifi(WifiProfile {
         ssid: "NewNet".into(),
         security: WifiSecurity::Wpa2,
         psk: String::new(),
         hidden: false,
+        autoconnect: true,
+        vpn_secondary: None,
         ipv4: Ipv4Profile::default(),
+        ipv6: Ipv6Profile::default(),
     });
     assert!(profile_to_settings(&profile).is_err());
 }

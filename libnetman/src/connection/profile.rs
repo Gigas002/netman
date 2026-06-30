@@ -75,6 +75,31 @@ impl Default for Ipv4Profile {
     }
 }
 
+/// IPv6 settings stored in a connection profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ipv6Profile {
+    pub method: IpMethod,
+    /// Host address without prefix (e.g. `2001:db8::10`).
+    pub address: String,
+    /// CIDR prefix length (e.g. `64`).
+    pub prefix: u32,
+    pub gateway: String,
+    /// Primary DNS server address.
+    pub dns: String,
+}
+
+impl Default for Ipv6Profile {
+    fn default() -> Self {
+        Self {
+            method: IpMethod::Auto,
+            address: String::new(),
+            prefix: 64,
+            gateway: String::new(),
+            dns: String::new(),
+        }
+    }
+}
+
 /// Editable Wi-Fi profile fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiProfile {
@@ -83,7 +108,11 @@ pub struct WifiProfile {
     /// Pre-shared key; empty means "leave unchanged" on save.
     pub psk: String,
     pub hidden: bool,
+    pub autoconnect: bool,
+    /// VPN profile UUID to activate when this connection comes up.
+    pub vpn_secondary: Option<String>,
     pub ipv4: Ipv4Profile,
+    pub ipv6: Ipv6Profile,
 }
 
 /// Editable Ethernet profile fields.
@@ -91,25 +120,53 @@ pub struct WifiProfile {
 pub struct EthernetProfile {
     /// Connection display name (NM `connection.id`).
     pub name: String,
+    pub autoconnect: bool,
+    /// VPN profile UUID to activate when this connection comes up.
+    pub vpn_secondary: Option<String>,
     pub ipv4: Ipv4Profile,
+    pub ipv6: Ipv6Profile,
     /// Empty string means leave MTU unchanged / default.
     pub mtu: String,
     /// Empty string means leave MAC unchanged / default.
     pub cloned_mac: String,
 }
 
-/// Editable VPN profile fields (plugin-specific data deferred).
+/// Editable VPN profile fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnProfile {
     /// Connection display name (NM `connection.id`).
     pub name: String,
     pub service_type: String,
-    /// VPN gateway / remote host (plugin-specific; OpenVPN `remote`).
+    /// VPN gateway / remote host (plugin-specific key).
     pub gateway: String,
     pub username: String,
     /// VPN password; stored in `vpn-secrets` when non-empty.
     pub password: String,
+    /// OpenVPN port; empty leaves unchanged.
+    pub port: String,
+    /// OpenVPN transport (`tcp` / `udp`).
+    pub protocol: String,
+    /// Cisco VPNC group name.
+    pub group_name: String,
     pub ipv4: Ipv4Profile,
+    pub ipv6: Ipv6Profile,
+}
+
+impl Default for VpnProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            service_type: String::new(),
+            gateway: String::new(),
+            username: String::new(),
+            password: String::new(),
+            port: String::new(),
+            protocol: "udp".into(),
+            group_name: String::new(),
+            ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
+        }
+    }
 }
 
 /// Top-level editable profile, keyed by connection kind.

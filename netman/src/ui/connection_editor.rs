@@ -112,7 +112,9 @@ fn field_value(
 mod tests {
     use super::*;
     use crate::app::editor_fields_for;
-    use libnetman::connection::{ConnectionProfile, Ipv4Profile, WifiProfile, WifiSecurity};
+    use libnetman::connection::{
+        ConnectionProfile, Ipv4Profile, Ipv6Profile, WifiProfile, WifiSecurity,
+    };
 
     #[test]
     fn wifi_editor_has_expected_fields() {
@@ -121,10 +123,15 @@ mod tests {
             security: WifiSecurity::Wpa2,
             psk: String::new(),
             hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
         });
         let fields = editor_fields_for(&profile, false);
         assert!(fields.contains(&EditorFieldId::Ssid));
         assert!(fields.contains(&EditorFieldId::IpMethod));
+        assert!(fields.contains(&EditorFieldId::Ip6Method));
+        assert!(fields.contains(&EditorFieldId::Autoconnect));
     }
 }

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub mod profile;
 
 pub use profile::{
-    ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, VpnProfile, WifiProfile,
+    ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, Ipv6Profile, VpnProfile, WifiProfile,
 };
 
 // ── Connection ────────────────────────────────────────────────────────────────

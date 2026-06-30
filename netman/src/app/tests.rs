@@ -1,6 +1,6 @@
 use libnetman::connection::{
     Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile, Ipv4Profile,
-    NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
+    Ipv6Profile, NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
 };
 
 use super::{EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status};
@@ -103,7 +103,10 @@ fn editor_fields_vary_by_connection_type() {
             security: WifiSecurity::Wpa2,
             psk: String::new(),
             hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
         }),
         false,
     );
@@ -113,7 +116,10 @@ fn editor_fields_vary_by_connection_type() {
     let eth = editor_fields_for(
         &ConnectionProfile::Ethernet(EthernetProfile {
             name: "eth".into(),
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
             mtu: String::new(),
             cloned_mac: String::new(),
         }),
@@ -125,7 +131,10 @@ fn editor_fields_vary_by_connection_type() {
     let eth_new = editor_fields_for(
         &ConnectionProfile::Ethernet(EthernetProfile {
             name: "eth".into(),
+            autoconnect: true,
+            vpn_secondary: None,
             ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
             mtu: String::new(),
             cloned_mac: String::new(),
         }),
@@ -137,13 +146,11 @@ fn editor_fields_vary_by_connection_type() {
         &ConnectionProfile::Vpn(VpnProfile {
             name: "vpn".into(),
             service_type: "org.freedesktop.NetworkManager.openvpn".into(),
-            gateway: String::new(),
-            username: String::new(),
-            password: String::new(),
-            ipv4: Ipv4Profile::default(),
+            ..VpnProfile::default()
         }),
         false,
     );
     assert!(vpn.contains(&EditorFieldId::VpnGateway));
+    assert!(vpn.contains(&EditorFieldId::VpnPort));
     assert!(vpn.contains(&EditorFieldId::VpnServiceType));
 }

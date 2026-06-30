@@ -79,7 +79,7 @@ pub fn wifi_connection_settings(
     settings.insert("ipv4".into(), ipv4);
 
     let mut ipv6 = HashMap::new();
-    ipv6.insert("method".into(), str_value("ignore"));
+    ipv6.insert("method".into(), str_value("auto"));
     settings.insert("ipv6".into(), ipv6);
 
     Ok(settings)

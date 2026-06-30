@@ -10,8 +10,8 @@ use zbus::zvariant::{OwnedValue, Value};
 use crate::{
     Result,
     connection::{
-        ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, VpnProfile, WifiProfile,
-        WifiSecurity,
+        ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, Ipv6Profile, VpnProfile,
+        WifiProfile, WifiSecurity,
     },
     error::Error,
 };
@@ -91,7 +91,7 @@ pub fn profile_to_settings(
     settings.insert("connection".into(), connection);
 
     let mut ipv6 = HashMap::new();
-    ipv6.insert("method".into(), str_value("ignore"));
+    ipv6.insert("method".into(), str_value("auto"));
     settings.insert("ipv6".into(), ipv6);
 
     match profile {
@@ -177,7 +177,10 @@ fn parse_wifi(
         security,
         psk,
         hidden,
+        autoconnect: parse_autoconnect(raw),
+        vpn_secondary: parse_vpn_secondary(raw),
         ipv4: parse_ipv4(raw),
+        ipv6: parse_ipv6(raw),
     }
 }
 
@@ -194,7 +197,10 @@ fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Etherne
 
     EthernetProfile {
         name,
+        autoconnect: parse_autoconnect(raw),
+        vpn_secondary: parse_vpn_secondary(raw),
         ipv4: parse_ipv4(raw),
+        ipv6: parse_ipv6(raw),
         mtu,
         cloned_mac,
     }
@@ -205,65 +211,53 @@ fn parse_vpn(
     secrets: Option<&HashMap<String, HashMap<String, OwnedValue>>>,
 ) -> VpnProfile {
     let vpn_section = raw.get("vpn");
-    let gateway = vpn_section
-        .and_then(|s| get_str_value(s, "remote"))
-        .unwrap_or_default();
-    let username = vpn_section
-        .and_then(|s| get_str_value(s, "username"))
-        .unwrap_or_default();
-    let password = secrets
-        .and_then(|s| s.get("vpn-secrets"))
-        .and_then(|sec| get_str_value(sec, "password"))
-        .or_else(|| {
-            raw.get("vpn-secrets")
-                .and_then(|sec| get_str_value(sec, "password"))
-        })
-        .unwrap_or_default();
+    let service_type = get_str_field(raw, "vpn", "service-type").unwrap_or_default();
+    let gateway = parse_vpn_gateway(vpn_section, &service_type);
 
     VpnProfile {
         name: get_str_field(raw, "connection", "id").unwrap_or_default(),
-        service_type: get_str_field(raw, "vpn", "service-type").unwrap_or_default(),
+        service_type,
         gateway,
-        username,
-        password,
+        username: vpn_section
+            .and_then(|s| get_str_value(s, "username"))
+            .unwrap_or_default(),
+        password: secrets
+            .and_then(|s| s.get("vpn-secrets"))
+            .and_then(|sec| get_str_value(sec, "password"))
+            .or_else(|| {
+                raw.get("vpn-secrets")
+                    .and_then(|sec| get_str_value(sec, "password"))
+            })
+            .unwrap_or_default(),
+        port: vpn_section
+            .and_then(|s| get_str_value(s, "port"))
+            .unwrap_or_default(),
+        protocol: vpn_section
+            .and_then(|s| get_str_value(s, "proto").or_else(|| get_str_value(s, "protocol")))
+            .unwrap_or_else(|| "udp".into()),
+        group_name: vpn_section
+            .and_then(|s| {
+                get_str_value(s, "IPSec-group-name")
+                    .or_else(|| get_str_value(s, "ipsec-group-name"))
+            })
+            .unwrap_or_default(),
         ipv4: parse_ipv4(raw),
+        ipv6: parse_ipv6(raw),
     }
 }
 
 fn parse_ipv4(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv4Profile {
-    let section = raw.get("ipv4");
-    let method = section
-        .and_then(|s| get_str_value(s, "method"))
-        .as_deref()
-        .map(parse_ip_method)
-        .unwrap_or(IpMethod::Auto);
+    parse_ip_profile(raw.get("ipv4"), 24)
+}
 
-    let mut address = String::new();
-    let mut prefix = 24u32;
-    if let Some(sec) = section {
-        if let Some(data) = get_address_data(sec) {
-            address = data.0;
-            prefix = data.1;
-        } else if let Some(data) = get_legacy_address(sec) {
-            address = data.0;
-            prefix = data.1;
-        }
-    }
-
-    let gateway = section
-        .and_then(|s| get_str_value(s, "gateway"))
-        .unwrap_or_default();
-
-    let dns = section
-        .and_then(|s| get_dns_data(s).or_else(|| get_legacy_dns(s)))
-        .unwrap_or_default();
-
-    Ipv4Profile {
-        method,
-        address,
-        prefix,
-        gateway,
-        dns,
+fn parse_ipv6(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv6Profile {
+    let parsed = parse_ip_profile(raw.get("ipv6"), 64);
+    Ipv6Profile {
+        method: parsed.method,
+        address: parsed.address,
+        prefix: parsed.prefix,
+        gateway: parsed.gateway,
+        dns: parsed.dns,
     }
 }
 
@@ -322,7 +316,9 @@ fn apply_wifi(
         settings.remove("802-1x");
     }
 
+    apply_link_options(settings, wifi.autoconnect, wifi.vpn_secondary.as_deref())?;
     apply_ipv4(settings, &wifi.ipv4)?;
+    apply_ipv6(settings, &wifi.ipv6)?;
     Ok(())
 }
 
@@ -356,7 +352,9 @@ fn apply_ethernet(
         );
     }
 
+    apply_link_options(settings, eth.autoconnect, eth.vpn_secondary.as_deref())?;
     apply_ipv4(settings, &eth.ipv4)?;
+    apply_ipv6(settings, &eth.ipv6)?;
     Ok(())
 }
 
@@ -379,11 +377,7 @@ fn apply_vpn(
     let section = settings.entry("vpn".into()).or_default();
     section.insert("service-type".into(), str_value(vpn.service_type.trim()));
 
-    if !vpn.gateway.trim().is_empty() {
-        section.insert("remote".into(), str_value(vpn.gateway.trim()));
-    } else {
-        section.remove("remote");
-    }
+    apply_vpn_gateway(section, &vpn.service_type, vpn.gateway.trim());
     if !vpn.username.trim().is_empty() {
         section.insert("username".into(), str_value(vpn.username.trim()));
     } else {
@@ -391,6 +385,32 @@ fn apply_vpn(
     }
     if vpn.service_type.contains("openvpn") {
         section.insert("connection-type".into(), str_value("password"));
+        if !vpn.port.trim().is_empty() {
+            section.insert("port".into(), str_value(vpn.port.trim()));
+        } else {
+            section.remove("port");
+        }
+        let proto = if vpn.protocol.eq_ignore_ascii_case("tcp") {
+            "tcp"
+        } else {
+            "udp"
+        };
+        section.insert("proto".into(), str_value(proto));
+    } else {
+        section.remove("port");
+        section.remove("proto");
+        section.remove("protocol");
+    }
+    if vpn.service_type.contains("vpnc") {
+        if !vpn.group_name.trim().is_empty() {
+            section.insert("IPSec-group-name".into(), str_value(vpn.group_name.trim()));
+        } else {
+            section.remove("IPSec-group-name");
+            section.remove("ipsec-group-name");
+        }
+    } else {
+        section.remove("IPSec-group-name");
+        section.remove("ipsec-group-name");
     }
 
     if !vpn.password.is_empty() {
@@ -401,6 +421,7 @@ fn apply_vpn(
     }
 
     apply_ipv4(settings, &vpn.ipv4)?;
+    apply_ipv6(settings, &vpn.ipv6)?;
     Ok(())
 }
 
@@ -408,28 +429,176 @@ fn apply_ipv4(
     settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
     ipv4: &Ipv4Profile,
 ) -> Result<()> {
-    let section = settings.entry("ipv4".into()).or_default();
-    section.insert("method".into(), str_value(ip_method_to_nm(ipv4.method)));
+    apply_ip_profile(settings, "ipv4", ipv4, 24)
+}
 
-    if ipv4.method == IpMethod::Manual {
-        if ipv4.address.trim().is_empty() {
-            return Err(Error::OperationFailed(
-                "Address is required for manual IPv4".into(),
-            ));
+fn apply_ipv6(
+    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    ipv6: &Ipv6Profile,
+) -> Result<()> {
+    let ip = Ipv4Profile {
+        method: ipv6.method,
+        address: ipv6.address.clone(),
+        prefix: ipv6.prefix,
+        gateway: ipv6.gateway.clone(),
+        dns: ipv6.dns.clone(),
+    };
+    apply_ip_profile(settings, "ipv6", &ip, 64)
+}
+
+fn apply_link_options(
+    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    autoconnect: bool,
+    vpn_secondary: Option<&str>,
+) -> Result<()> {
+    let connection = settings.entry("connection".into()).or_default();
+    connection.insert("autoconnect".into(), bool_value(autoconnect));
+    if let Some(uuid) = vpn_secondary.filter(|u| !u.is_empty()) {
+        connection.insert("secondaries".into(), str_array_value(&[uuid.to_owned()]));
+    } else {
+        connection.remove("secondaries");
+    }
+    Ok(())
+}
+
+fn parse_autoconnect(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> bool {
+    raw.get("connection")
+        .and_then(|s| get_bool_value(s, "autoconnect"))
+        .unwrap_or(true)
+}
+
+fn parse_vpn_secondary(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Option<String> {
+    let values = raw
+        .get("connection")
+        .and_then(|s| get_str_array(s, "secondaries"))?;
+    values.into_iter().find(|u| !u.is_empty())
+}
+
+fn parse_ip_profile(
+    section: Option<&HashMap<String, OwnedValue>>,
+    default_prefix: u32,
+) -> Ipv4Profile {
+    let method = section
+        .and_then(|s| get_str_value(s, "method"))
+        .as_deref()
+        .map(parse_ip_method)
+        .unwrap_or(IpMethod::Auto);
+
+    let mut address = String::new();
+    let mut prefix = default_prefix;
+    if let Some(sec) = section {
+        if let Some(data) = get_address_data(sec, default_prefix) {
+            address = data.0;
+            prefix = data.1;
+        } else if let Some(data) = get_legacy_address(sec) {
+            address = data.0;
+            prefix = data.1;
         }
-        let prefix = if ipv4.prefix == 0 { 24 } else { ipv4.prefix };
+    }
+
+    let gateway = section
+        .and_then(|s| get_str_value(s, "gateway"))
+        .unwrap_or_default();
+
+    let dns = section
+        .and_then(|s| get_dns_data(s).or_else(|| get_legacy_dns(s)))
+        .unwrap_or_default();
+
+    Ipv4Profile {
+        method,
+        address,
+        prefix,
+        gateway,
+        dns,
+    }
+}
+
+fn parse_vpn_gateway(
+    vpn_section: Option<&HashMap<String, OwnedValue>>,
+    service_type: &str,
+) -> String {
+    let Some(section) = vpn_section else {
+        return String::new();
+    };
+    for key in vpn_gateway_keys(service_type) {
+        if let Some(value) = get_str_value(section, key)
+            && !value.is_empty()
+        {
+            return value;
+        }
+    }
+    String::new()
+}
+
+fn vpn_gateway_keys(service_type: &str) -> &'static [&'static str] {
+    if service_type.contains("openvpn") {
+        &["remote"]
+    } else if service_type.contains("openconnect") || service_type.contains("fortisslvpn") {
+        &["gateway"]
+    } else if service_type.contains("vpnc") {
+        &["IPSec gateway", "IPSec-gateway", "gateway"]
+    } else if service_type.contains("pptp") || service_type.contains("l2tp") {
+        &["gateway"]
+    } else if service_type.contains("wireguard") {
+        &["endpoint", "remote", "gateway"]
+    } else {
+        &["gateway", "remote", "IPSec gateway"]
+    }
+}
+
+fn apply_vpn_gateway(section: &mut HashMap<String, OwnedValue>, service_type: &str, gateway: &str) {
+    for key in ALL_VPN_GATEWAY_KEYS {
+        section.remove(*key);
+    }
+    if gateway.is_empty() {
+        return;
+    }
+    let keys = vpn_gateway_keys(service_type);
+    if let Some(key) = keys.first() {
+        section.insert((*key).into(), str_value(gateway));
+    }
+}
+
+const ALL_VPN_GATEWAY_KEYS: &[&str] = &[
+    "remote",
+    "gateway",
+    "IPSec gateway",
+    "IPSec-gateway",
+    "endpoint",
+];
+
+fn apply_ip_profile(
+    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    section_name: &str,
+    ip: &Ipv4Profile,
+    default_prefix: u32,
+) -> Result<()> {
+    let section = settings.entry(section_name.into()).or_default();
+    section.insert("method".into(), str_value(ip_method_to_nm(ip.method)));
+
+    if ip.method == IpMethod::Manual {
+        if ip.address.trim().is_empty() {
+            return Err(Error::OperationFailed(format!(
+                "Address is required for manual {section_name}"
+            )));
+        }
+        let prefix = if ip.prefix == 0 {
+            default_prefix
+        } else {
+            ip.prefix
+        };
         section.insert(
             "address-data".into(),
-            address_data_value(&ipv4.address, prefix),
+            address_data_value(&ip.address, prefix),
         );
         section.remove("addresses");
-        if !ipv4.gateway.trim().is_empty() {
-            section.insert("gateway".into(), str_value(ipv4.gateway.trim()));
+        if !ip.gateway.trim().is_empty() {
+            section.insert("gateway".into(), str_value(ip.gateway.trim()));
         } else {
             section.remove("gateway");
         }
-        if !ipv4.dns.trim().is_empty() {
-            section.insert("dns-data".into(), dns_data_value(&ipv4.dns));
+        if !ip.dns.trim().is_empty() {
+            section.insert("dns-data".into(), dns_data_value(&ip.dns));
             section.remove("dns");
         } else {
             section.remove("dns-data");
@@ -483,12 +652,15 @@ fn ip_method_to_nm(method: IpMethod) -> &'static str {
     }
 }
 
-fn get_address_data(section: &HashMap<String, OwnedValue>) -> Option<(String, u32)> {
+fn get_address_data(
+    section: &HashMap<String, OwnedValue>,
+    default_prefix: u32,
+) -> Option<(String, u32)> {
     let data = section.get("address-data")?;
     let entries: Vec<HashMap<String, OwnedValue>> = Vec::try_from(data.try_clone().ok()?).ok()?;
     let first = entries.first()?;
     let address = get_str_value(first, "address")?;
-    let prefix = get_u32_value(first, "prefix").unwrap_or(24);
+    let prefix = get_u32_value(first, "prefix").unwrap_or(default_prefix);
     Some((address, prefix))
 }
 
@@ -539,6 +711,11 @@ fn get_bool_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> 
     bool::try_from(v).ok()
 }
 
+fn get_str_array(map: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<String>> {
+    let v = map.get(key)?;
+    Vec::<String>::try_from(v.try_clone().ok()?).ok()
+}
+
 fn str_value(s: &str) -> OwnedValue {
     Value::from(s).try_into().expect("string OwnedValue")
 }
@@ -572,6 +749,12 @@ fn dns_data_value(dns: &str) -> OwnedValue {
     Value::from(vec![entry])
         .try_into()
         .expect("dns-data OwnedValue")
+}
+
+fn str_array_value(values: &[String]) -> OwnedValue {
+    Value::from(values.to_vec())
+        .try_into()
+        .expect("string array OwnedValue")
 }
 
 #[cfg(test)]
