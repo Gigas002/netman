@@ -1,8 +1,9 @@
 use libnetman::connection::{
-    Connection, ConnectionKind, ConnectionStatus, NmState, WifiInfo, WifiMode, WifiSecurity,
+    Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile, Ipv4Profile,
+    NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
 };
 
-use super::{ListItem, build_list_items, is_inflight_status};
+use super::{ListItem, build_list_items, editor_fields_for, is_inflight_status, EditorFieldId};
 
 fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
     Connection {
@@ -90,4 +91,31 @@ fn inflight_status_messages() {
     assert!(is_inflight_status("Deactivating…"));
     assert!(!is_inflight_status("Activation failed: no device"));
     assert!(!is_inflight_status("Demo mode — connect not available"));
+}
+
+#[test]
+fn editor_fields_vary_by_connection_type() {
+    let wifi = editor_fields_for(&ConnectionProfile::Wifi(WifiProfile {
+        ssid: "x".into(),
+        security: WifiSecurity::Wpa2,
+        psk: String::new(),
+        hidden: false,
+        ipv4: Ipv4Profile::default(),
+    }));
+    assert!(wifi.contains(&EditorFieldId::Ssid));
+    assert!(!wifi.contains(&EditorFieldId::Mtu));
+
+    let eth = editor_fields_for(&ConnectionProfile::Ethernet(EthernetProfile {
+        ipv4: Ipv4Profile::default(),
+        mtu: String::new(),
+        cloned_mac: String::new(),
+    }));
+    assert!(eth.contains(&EditorFieldId::Mtu));
+    assert!(!eth.contains(&EditorFieldId::Ssid));
+
+    let vpn = editor_fields_for(&ConnectionProfile::Vpn(VpnProfile {
+        service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+        ipv4: Ipv4Profile::default(),
+    }));
+    assert!(vpn.contains(&EditorFieldId::VpnServiceType));
 }

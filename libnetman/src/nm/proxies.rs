@@ -90,6 +90,23 @@ pub trait Settings {
 pub trait SettingsConnection {
     /// Return all settings for this connection profile.
     fn get_settings(&self) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+
+    /// Return secrets for the given settings section (e.g. `802-11-wireless-security`).
+    fn get_secrets(
+        &self,
+        setting_name: &str,
+    ) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+
+    /// Update connection settings and persist to disk when `flags` includes `TO_DISK`.
+    fn update2(
+        &self,
+        settings: HashMap<String, HashMap<String, OwnedValue>>,
+        flags: u32,
+    ) -> zbus::Result<(
+        HashMap<String, HashMap<String, OwnedValue>>,
+        HashMap<String, OwnedValue>,
+        HashMap<String, OwnedValue>,
+    )>;
 }
 
 // ── org.freedesktop.NetworkManager.Connection.Active ─────────────────────────

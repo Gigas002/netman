@@ -8,6 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod profile;
+
+pub use profile::{
+    ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, VpnProfile, WifiProfile,
+};
+
 // ── Connection ────────────────────────────────────────────────────────────────
 
 /// A network connection known to NetworkManager (saved or active).
@@ -134,6 +140,23 @@ impl WifiSecurity {
 
     pub fn is_secured(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Security modes the connection editor allows cycling through.
+    pub fn editable_values() -> &'static [Self] {
+        &[Self::None, Self::Wpa2, Self::Wpa3]
+    }
+
+    pub fn next_editable(self) -> Self {
+        let all = Self::editable_values();
+        let idx = all.iter().position(|s| *s == self).unwrap_or(0);
+        all[(idx + 1) % all.len()]
+    }
+
+    pub fn prev_editable(self) -> Self {
+        let all = Self::editable_values();
+        let idx = all.iter().position(|s| *s == self).unwrap_or(0);
+        all[(idx + all.len() - 1) % all.len()]
     }
 }
 

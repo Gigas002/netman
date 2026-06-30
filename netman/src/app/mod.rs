@@ -14,7 +14,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use libnetman::connection::{Connection, ConnectionStatus, NmState, WifiSecurity};
+use libnetman::connection::{
+    Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile,
+    Ipv4Profile, NmState, VpnProfile, WifiProfile, WifiSecurity,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::time;
@@ -78,6 +81,8 @@ pub async fn run(settings: Settings) -> Result<()> {
                                         password,
                                         hidden,
                                     } => app.on_connect_unsaved(ssid, security, password, hidden).await,
+                                    Action::EditConnection(uuid) => app.on_edit_connection(uuid).await,
+                                    Action::SaveConnection => app.on_save_connection().await,
                                 }
                             }
                             Ok(Event::Paste(text)) => app.handle_paste(&text),
@@ -128,6 +133,8 @@ pub struct App {
     pub password_prompt: Option<PasswordPrompt>,
     /// Hidden-network overlay (SSID + password).
     pub hidden_network_prompt: Option<HiddenNetworkPrompt>,
+    /// Connection profile editor overlay.
+    pub connection_editor: Option<ConnectionEditor>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
@@ -202,6 +209,166 @@ impl HiddenNetworkPrompt {
     }
 }
 
+/// Identifies one editable field in the connection editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorFieldId {
+    Ssid,
+    Security,
+    Password,
+    Hidden,
+    IpMethod,
+    IpAddress,
+    Prefix,
+    Gateway,
+    Dns,
+    Mtu,
+    ClonedMac,
+    VpnServiceType,
+}
+
+/// State for the connection profile editor modal.
+pub struct ConnectionEditor {
+    pub uuid: String,
+    pub title: String,
+    pub profile: ConnectionProfile,
+    pub fields: Vec<EditorFieldId>,
+    pub focused: usize,
+    pub inputs: std::collections::HashMap<EditorFieldId, TextInput>,
+    pub show_secrets: bool,
+    pub error: Option<String>,
+}
+
+impl ConnectionEditor {
+    pub fn new(uuid: String, title: String, profile: ConnectionProfile) -> Self {
+        let fields = editor_fields_for(&profile);
+        let mut inputs = std::collections::HashMap::new();
+        populate_inputs(&mut inputs, &profile);
+        Self {
+            uuid,
+            title,
+            profile,
+            fields,
+            focused: 0,
+            inputs,
+            show_secrets: false,
+            error: None,
+        }
+    }
+
+    fn focused_field(&self) -> Option<EditorFieldId> {
+        self.fields.get(self.focused).copied()
+    }
+
+    fn next_field(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.sync_focused_text();
+        self.focused = (self.focused + 1) % self.fields.len();
+    }
+
+    fn prev_field(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.sync_focused_text();
+        self.focused = (self.focused + self.fields.len() - 1) % self.fields.len();
+    }
+
+    fn sync_focused_text(&mut self) {
+        let Some(field) = self.focused_field() else {
+            return;
+        };
+        if !field.is_text() {
+            return;
+        }
+        let Some(input) = self.inputs.get(&field) else {
+            return;
+        };
+        let text = input.text().to_owned();
+        apply_text_field(&mut self.profile, field, &text);
+    }
+
+    fn sync_all_text(&mut self) {
+        for field in &self.fields {
+            if field.is_text()
+                && let Some(input) = self.inputs.get(field)
+            {
+                apply_text_field(&mut self.profile, *field, input.text());
+            }
+        }
+    }
+
+    fn cycle_choice(&mut self, forward: bool) {
+        let Some(field) = self.focused_field() else {
+            return;
+        };
+        match field {
+            EditorFieldId::Security => {
+                if let ConnectionProfile::Wifi(w) = &mut self.profile {
+                    w.security = if forward {
+                        w.security.next_editable()
+                    } else {
+                        w.security.prev_editable()
+                    };
+                }
+            }
+            EditorFieldId::IpMethod => {
+                if let Some(ipv4) = profile_ipv4_mut(&mut self.profile) {
+                    ipv4.method = if forward {
+                        ipv4.method.next()
+                    } else {
+                        ipv4.method.prev()
+                    };
+                }
+            }
+            EditorFieldId::Hidden => {
+                if let ConnectionProfile::Wifi(w) = &mut self.profile {
+                    w.hidden = !w.hidden;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
+        let field = self.focused_field()?;
+        self.inputs.get_mut(&field)
+    }
+
+    pub fn display_value(&self, field: EditorFieldId) -> String {
+        match field {
+            EditorFieldId::Security => {
+                if let ConnectionProfile::Wifi(w) = &self.profile {
+                    w.security.label().to_owned()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::Hidden => {
+                if let ConnectionProfile::Wifi(w) = &self.profile {
+                    if w.hidden { "yes" } else { "no" }.to_owned()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::IpMethod => {
+                profile_ipv4_ref(&self.profile)
+                    .map(|ip| ip.method.label().to_owned())
+                    .unwrap_or_default()
+            }
+            EditorFieldId::VpnServiceType => {
+                if let ConnectionProfile::Vpn(v) = &self.profile {
+                    v.service_type.clone()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
+
 /// Waits for NM active-connection state change signals when D-Bus is enabled.
 struct StateChangeWaiter {
     #[cfg(feature = "dbus")]
@@ -273,6 +440,8 @@ enum Action {
         password: Option<String>,
         hidden: bool,
     },
+    EditConnection(String),
+    SaveConnection,
 }
 
 impl App {
@@ -297,6 +466,7 @@ impl App {
                         status_message: None,
                         password_prompt: None,
                         hidden_network_prompt: None,
+                        connection_editor: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -322,6 +492,7 @@ impl App {
             status_message: Some("Demo mode — NetworkManager not available".into()),
             password_prompt: None,
             hidden_network_prompt: None,
+            connection_editor: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -364,6 +535,9 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        if let Some(action) = self.handle_connection_editor_key(code, modifiers) {
+            return action;
+        }
         if let Some(action) = self.handle_hidden_network_key(code, modifiers) {
             return action;
         }
@@ -393,9 +567,70 @@ impl App {
             }
             KeyCode::Char('n') => return Action::ToggleNetworking,
             KeyCode::Char('w') => return Action::ToggleWireless,
+            KeyCode::Char('e') => return self.edit_selected(),
             _ => {}
         }
         Action::Continue
+    }
+
+    fn handle_connection_editor_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let editor = self.connection_editor.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.connection_editor = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if code == KeyCode::Tab {
+                    editor.next_field();
+                } else {
+                    editor.prev_field();
+                }
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => Some(Action::SaveConnection),
+            KeyCode::Left => {
+                editor.cycle_choice(false);
+                Some(Action::Continue)
+            }
+            KeyCode::Right => {
+                editor.cycle_choice(true);
+                Some(Action::Continue)
+            }
+            KeyCode::Char(' ') => {
+                if editor.focused_field() == Some(EditorFieldId::Hidden) {
+                    editor.cycle_choice(true);
+                } else if let Some(input) = editor.focused_input_mut() {
+                    input.insert_str(" ");
+                    editor.error = None;
+                }
+                Some(Action::Continue)
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                editor.show_secrets = !editor.show_secrets;
+                Some(Action::Continue)
+            }
+            _ => {
+                if let Some(field) = editor.focused_field() {
+                    if field.is_read_only() || field.is_choice() || field.is_toggle() {
+                        return Some(Action::Continue);
+                    }
+                    if let Some(input) = editor.focused_input_mut()
+                        && input.handle_key(code, modifiers)
+                    {
+                        editor.error = None;
+                    }
+                }
+                Some(Action::Continue)
+            }
+        }
     }
 
     fn handle_hidden_network_key(
@@ -496,6 +731,13 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        if let Some(editor) = &mut self.connection_editor {
+            if let Some(input) = editor.focused_input_mut() {
+                input.insert_str(text);
+                editor.error = None;
+            }
+            return;
+        }
         if let Some(prompt) = &mut self.hidden_network_prompt {
             prompt.focused_input_mut().insert_str(text);
             prompt.error = None;
@@ -627,6 +869,88 @@ impl App {
 
         self.status_message = Some("Deactivating…".into());
         Action::Deactivate(conn.uuid)
+    }
+
+    fn edit_selected(&mut self) -> Action {
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_saved() {
+            self.status_message = Some("Only saved profiles can be edited.".into());
+            return Action::Continue;
+        }
+
+        if self.demo_mode {
+            let profile = demo_profile_from_connection(&conn);
+            if !profile.is_editable() {
+                self.status_message = Some("This connection type cannot be edited.".into());
+                return Action::Continue;
+            }
+            self.connection_editor = Some(ConnectionEditor::new(
+                conn.uuid.clone(),
+                conn.label().to_owned(),
+                profile,
+            ));
+            return Action::Continue;
+        }
+
+        Action::EditConnection(conn.uuid)
+    }
+
+    async fn on_edit_connection(&mut self, uuid: String) {
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.get_connection_profile(&uuid).await {
+                Ok(profile) => {
+                    if !profile.is_editable() {
+                        self.status_message =
+                            Some("This connection type cannot be edited.".into());
+                        return;
+                    }
+                    let title = self
+                        .selected_connection()
+                        .map(|c| c.label().to_owned())
+                        .unwrap_or_else(|| uuid.clone());
+                    self.connection_editor =
+                        Some(ConnectionEditor::new(uuid, title, profile));
+                }
+                Err(e) => self.status_message = Some(format!("Load failed: {e}")),
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    async fn on_save_connection(&mut self) {
+        let Some(editor) = &mut self.connection_editor else {
+            return;
+        };
+        editor.sync_all_text();
+
+        if self.demo_mode {
+            self.connection_editor = None;
+            self.status_message = Some("Demo mode — save not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            let uuid = editor.uuid.clone();
+            let profile = editor.profile.clone();
+            match nm.update_connection_profile(&uuid, &profile).await {
+                Ok(()) => {
+                    self.connection_editor = None;
+                    self.status_message = Some("Connection saved.".into());
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(ed) = &mut self.connection_editor {
+                        ed.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
     }
 
     async fn on_activate(&mut self, uuid: &str) {
@@ -793,6 +1117,206 @@ impl App {
 /// Returns `true` for transient connect/disconnect status messages.
 fn is_inflight_status(message: &str) -> bool {
     matches!(message, "Activating…" | "Deactivating…")
+}
+
+// ── Connection editor helpers ─────────────────────────────────────────────────
+
+impl EditorFieldId {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ssid => "SSID",
+            Self::Security => "Security",
+            Self::Password => "Password",
+            Self::Hidden => "Hidden network",
+            Self::IpMethod => "IPv4 method",
+            Self::IpAddress => "IPv4 address",
+            Self::Prefix => "Prefix length",
+            Self::Gateway => "Gateway",
+            Self::Dns => "DNS",
+            Self::Mtu => "MTU",
+            Self::ClonedMac => "Cloned MAC",
+            Self::VpnServiceType => "VPN service",
+        }
+    }
+
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::Ssid
+                | Self::Password
+                | Self::IpAddress
+                | Self::Prefix
+                | Self::Gateway
+                | Self::Dns
+                | Self::Mtu
+                | Self::ClonedMac
+        )
+    }
+
+    pub fn is_secret(self) -> bool {
+        self == Self::Password
+    }
+
+    pub fn is_choice(self) -> bool {
+        matches!(self, Self::Security | Self::IpMethod)
+    }
+
+    pub fn is_toggle(self) -> bool {
+        self == Self::Hidden
+    }
+
+    pub fn is_read_only(self) -> bool {
+        self == Self::VpnServiceType
+    }
+}
+
+pub(crate) fn editor_fields_for(profile: &ConnectionProfile) -> Vec<EditorFieldId> {
+    match profile {
+        ConnectionProfile::Wifi(_) => vec![
+            EditorFieldId::Ssid,
+            EditorFieldId::Security,
+            EditorFieldId::Password,
+            EditorFieldId::Hidden,
+            EditorFieldId::IpMethod,
+            EditorFieldId::IpAddress,
+            EditorFieldId::Prefix,
+            EditorFieldId::Gateway,
+            EditorFieldId::Dns,
+        ],
+        ConnectionProfile::Ethernet(_) => vec![
+            EditorFieldId::IpMethod,
+            EditorFieldId::IpAddress,
+            EditorFieldId::Prefix,
+            EditorFieldId::Gateway,
+            EditorFieldId::Dns,
+            EditorFieldId::Mtu,
+            EditorFieldId::ClonedMac,
+        ],
+        ConnectionProfile::Vpn(_) => vec![
+            EditorFieldId::VpnServiceType,
+            EditorFieldId::IpMethod,
+            EditorFieldId::IpAddress,
+            EditorFieldId::Prefix,
+            EditorFieldId::Gateway,
+            EditorFieldId::Dns,
+        ],
+        ConnectionProfile::Unsupported { .. } => vec![],
+    }
+}
+
+fn populate_inputs(
+    inputs: &mut std::collections::HashMap<EditorFieldId, TextInput>,
+    profile: &ConnectionProfile,
+) {
+    let mut set = |field: EditorFieldId, value: &str| {
+        let mut input = TextInput::new();
+        input.insert_str(value);
+        inputs.insert(field, input);
+    };
+
+    match profile {
+        ConnectionProfile::Wifi(w) => {
+            set(EditorFieldId::Ssid, &w.ssid);
+            set(EditorFieldId::Password, &w.psk);
+            set(EditorFieldId::IpAddress, &w.ipv4.address);
+            set(EditorFieldId::Prefix, &w.ipv4.prefix.to_string());
+            set(EditorFieldId::Gateway, &w.ipv4.gateway);
+            set(EditorFieldId::Dns, &w.ipv4.dns);
+        }
+        ConnectionProfile::Ethernet(e) => {
+            set(EditorFieldId::IpAddress, &e.ipv4.address);
+            set(EditorFieldId::Prefix, &e.ipv4.prefix.to_string());
+            set(EditorFieldId::Gateway, &e.ipv4.gateway);
+            set(EditorFieldId::Dns, &e.ipv4.dns);
+            set(EditorFieldId::Mtu, &e.mtu);
+            set(EditorFieldId::ClonedMac, &e.cloned_mac);
+        }
+        ConnectionProfile::Vpn(v) => {
+            set(EditorFieldId::IpAddress, &v.ipv4.address);
+            set(EditorFieldId::Prefix, &v.ipv4.prefix.to_string());
+            set(EditorFieldId::Gateway, &v.ipv4.gateway);
+            set(EditorFieldId::Dns, &v.ipv4.dns);
+        }
+        ConnectionProfile::Unsupported { .. } => {}
+    }
+}
+
+fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text: &str) {
+    match profile {
+        ConnectionProfile::Wifi(w) => match field {
+            EditorFieldId::Ssid => w.ssid = text.to_owned(),
+            EditorFieldId::Password => w.psk = text.to_owned(),
+            EditorFieldId::IpAddress => w.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => w.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => w.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => w.ipv4.dns = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Ethernet(e) => match field {
+            EditorFieldId::IpAddress => e.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => e.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => e.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => e.ipv4.dns = text.to_owned(),
+            EditorFieldId::Mtu => e.mtu = text.to_owned(),
+            EditorFieldId::ClonedMac => e.cloned_mac = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Vpn(v) => match field {
+            EditorFieldId::IpAddress => v.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => v.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => v.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => v.ipv4.dns = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Unsupported { .. } => {}
+    }
+}
+
+fn profile_ipv4_mut(profile: &mut ConnectionProfile) -> Option<&mut Ipv4Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&mut w.ipv4),
+        ConnectionProfile::Ethernet(e) => Some(&mut e.ipv4),
+        ConnectionProfile::Vpn(v) => Some(&mut v.ipv4),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn profile_ipv4_ref(profile: &ConnectionProfile) -> Option<&Ipv4Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&w.ipv4),
+        ConnectionProfile::Ethernet(e) => Some(&e.ipv4),
+        ConnectionProfile::Vpn(v) => Some(&v.ipv4),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
+    match &conn.kind {
+        ConnectionKind::Wifi(w) => ConnectionProfile::Wifi(WifiProfile {
+            ssid: w.ssid.clone(),
+            security: w.security,
+            psk: String::new(),
+            hidden: false,
+            ipv4: Ipv4Profile::default(),
+        }),
+        ConnectionKind::Ethernet => ConnectionProfile::Ethernet(EthernetProfile {
+            ipv4: Ipv4Profile::default(),
+            mtu: String::new(),
+            cloned_mac: String::new(),
+        }),
+        ConnectionKind::Vpn(v) => ConnectionProfile::Vpn(VpnProfile {
+            service_type: v.service_type.clone(),
+            ipv4: Ipv4Profile::default(),
+        }),
+        ConnectionKind::Loopback => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: "loopback".into(),
+        },
+        ConnectionKind::Other(t) => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: t.clone(),
+        },
+    }
 }
 
 // ── List building helpers ─────────────────────────────────────────────────────

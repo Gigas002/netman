@@ -6,6 +6,7 @@
 //! It wraps the `zbus` async interface to the `org.freedesktop.NetworkManager`
 //! service and presents the results as the domain types from [`crate::connection`].
 
+mod connection_settings;
 mod proxies;
 mod wifi_settings;
 
@@ -19,11 +20,13 @@ use zbus::zvariant::OwnedValue;
 use crate::{
     Result,
     connection::{
-        Connection as NmConn, ConnectionKind, ConnectionStatus, ConnectivityState, Ip4Config,
-        NmState, VpnInfo, WifiInfo, WifiMode, WifiSecurity, merge_wifi_scan_data, wifi_strength,
+        Connection as NmConn, ConnectionKind, ConnectionProfile, ConnectionStatus,
+        ConnectivityState, Ip4Config, NmState, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
+        merge_wifi_scan_data, wifi_strength,
     },
     error::Error,
 };
+use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile};
 use proxies::{
     AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
     NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
@@ -212,6 +215,31 @@ impl NmClient {
         Ok(rx)
     }
 
+    /// Load editable profile settings for a saved connection.
+    pub async fn get_connection_profile(&self, uuid: &str) -> Result<ConnectionProfile> {
+        let (raw, secrets) = self.load_connection_settings(uuid).await?;
+        Ok(parse_profile(&raw, secrets.as_ref()))
+    }
+
+    /// Save edited profile settings via `SettingsConnection::Update2`.
+    pub async fn update_connection_profile(
+        &self,
+        uuid: &str,
+        profile: &ConnectionProfile,
+    ) -> Result<()> {
+        let settings = SettingsProxy::new(&self.conn).await?;
+        let path = settings.get_connection_by_uuid(uuid).await?;
+        let (raw, _) = self.load_connection_settings(uuid).await?;
+        let updated = apply_profile(&raw, profile)?;
+        let sc = SettingsConnectionProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        sc.update2(updated, UPDATE2_TO_DISK).await?;
+        Ok(())
+    }
+
     /// Deactivate (disconnect) an active connection by UUID.
     pub async fn deactivate(&self, uuid: &str) -> Result<()> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;
@@ -232,6 +260,31 @@ impl NmClient {
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
+
+    async fn load_connection_settings(
+        &self,
+        uuid: &str,
+    ) -> Result<(
+        HashMap<String, HashMap<String, OwnedValue>>,
+        Option<HashMap<String, HashMap<String, OwnedValue>>>,
+    )> {
+        let settings = SettingsProxy::new(&self.conn).await?;
+        let path = settings.get_connection_by_uuid(uuid).await?;
+        let sc = SettingsConnectionProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        let raw = sc.get_settings().await?;
+
+        let secrets = if raw.contains_key("802-11-wireless-security") {
+            sc.get_secrets("802-11-wireless-security").await.ok()
+        } else {
+            None
+        };
+
+        Ok((raw, secrets))
+    }
 
     async fn build_connection(
         &self,
