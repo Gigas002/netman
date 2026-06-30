@@ -50,6 +50,14 @@ pub async fn run(settings: Settings) -> Result<()> {
                     warn!(error = %e, "refresh failed");
                 }
             }
+            state_changed = app.state_watcher.wait() => {
+                if state_changed.is_some() {
+                    app.clear_inflight_status();
+                    if let Err(e) = app.refresh().await {
+                        warn!(error = %e, "refresh after state change failed");
+                    }
+                }
+            }
             ready = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(50))) => {
                 match ready {
                     Ok(Ok(true)) => {
@@ -58,6 +66,8 @@ pub async fn run(settings: Settings) -> Result<()> {
                                 match app.handle_key(key.code, key.modifiers) {
                                     Action::Quit => break Ok(()),
                                     Action::Continue => {}
+                                    Action::Activate(uuid) => app.on_activate(&uuid).await,
+                                    Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
                                 }
                             }
                             Ok(Event::Resize(_, _)) => {}
@@ -97,10 +107,43 @@ pub struct App {
     pub demo_mode: bool,
     /// Help overlay visible.
     pub show_help: bool,
-    /// Status message shown in the status bar (clears on next refresh).
+    /// Status message shown in the status bar (clears after NM state changes).
     pub status_message: Option<String>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
+    state_watcher: StateChangeWaiter,
+}
+
+/// Waits for NM active-connection state change signals when D-Bus is enabled.
+struct StateChangeWaiter {
+    #[cfg(feature = "dbus")]
+    rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+}
+
+impl StateChangeWaiter {
+    #[cfg(feature = "dbus")]
+    fn new(rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Self {
+        Self { rx }
+    }
+
+    #[cfg(not(feature = "dbus"))]
+    fn new() -> Self {
+        Self {}
+    }
+
+    async fn wait(&mut self) -> Option<()> {
+        #[cfg(feature = "dbus")]
+        {
+            match self.rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        {
+            std::future::pending().await
+        }
+    }
 }
 
 /// A single row in the connection list.
@@ -126,6 +169,8 @@ impl ListItem {
 enum Action {
     Quit,
     Continue,
+    Activate(String),
+    Deactivate(String),
 }
 
 impl App {
@@ -136,6 +181,8 @@ impl App {
         {
             match libnetman::nm::NmClient::connect().await {
                 Ok(nm) => {
+                    let state_rx = nm.watch_active_state_changes().await.ok();
+                    let state_watcher = StateChangeWaiter::new(state_rx);
                     let mut app = Self {
                         items: Vec::new(),
                         selected: 0,
@@ -145,6 +192,7 @@ impl App {
                         show_help: false,
                         status_message: None,
                         nm: Some(nm),
+                        state_watcher,
                     };
                     let _ = app.refresh().await;
                     return app;
@@ -166,6 +214,16 @@ impl App {
             status_message: Some("Demo mode — NetworkManager not available".into()),
             #[cfg(feature = "dbus")]
             nm: None,
+            state_watcher: {
+                #[cfg(feature = "dbus")]
+                {
+                    StateChangeWaiter::new(None)
+                }
+                #[cfg(not(feature = "dbus"))]
+                {
+                    StateChangeWaiter::new()
+                }
+            },
         };
         app.items = demo_connections();
         app
@@ -204,8 +262,8 @@ impl App {
             KeyCode::Tab | KeyCode::Char('p') => self.show_detail = !self.show_detail,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Enter => self.connect_selected(),
-            KeyCode::Char('d') | KeyCode::Delete => self.disconnect_selected(),
+            KeyCode::Enter => return self.connect_selected(),
+            KeyCode::Char('d') | KeyCode::Delete => return self.disconnect_selected(),
             KeyCode::Char('r') | KeyCode::F(5) => {
                 self.status_message = Some("Refreshing…".into());
             }
@@ -239,25 +297,92 @@ impl App {
         self.items[item_idx].as_connection()
     }
 
-    fn connect_selected(&mut self) {
-        if let Some(conn) = self.selected_connection() {
-            if conn.is_active() {
-                self.status_message = Some(format!("'{}' is already connected.", conn.label()));
-            } else {
-                self.status_message = Some(format!("Connecting to '{}'…", conn.label()));
-            }
+    fn connect_selected(&mut self) -> Action {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — connect not available".into());
+            return Action::Continue;
         }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if conn.is_active() {
+            self.status_message = Some(format!("'{}' is already connected.", conn.label()));
+            return Action::Continue;
+        }
+
+        self.status_message = Some("Activating…".into());
+        Action::Activate(conn.uuid)
     }
 
-    fn disconnect_selected(&mut self) {
-        if let Some(conn) = self.selected_connection() {
-            if conn.is_active() {
-                self.status_message = Some(format!("Disconnecting '{}'…", conn.label()));
-            } else {
-                self.status_message = Some(format!("'{}' is not active.", conn.label()));
-            }
+    fn disconnect_selected(&mut self) -> Action {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — disconnect not available".into());
+            return Action::Continue;
+        }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_active() {
+            self.status_message = Some(format!("'{}' is not active.", conn.label()));
+            return Action::Continue;
+        }
+
+        self.status_message = Some("Deactivating…".into());
+        Action::Deactivate(conn.uuid)
+    }
+
+    async fn on_activate(&mut self, uuid: &str) {
+        #[cfg(feature = "dbus")]
+        if let Err(e) = self.activate(uuid).await {
+            self.status_message = Some(format!("Activation failed: {e}"));
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    async fn on_deactivate(&mut self, uuid: &str) {
+        #[cfg(feature = "dbus")]
+        if let Err(e) = self.deactivate(uuid).await {
+            self.status_message = Some(format!("Deactivation failed: {e}"));
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    #[cfg(feature = "dbus")]
+    async fn activate(&self, uuid: &str) -> libnetman::Result<()> {
+        let Some(nm) = &self.nm else {
+            return Ok(());
+        };
+        nm.activate(uuid).await
+    }
+
+    #[cfg(feature = "dbus")]
+    async fn deactivate(&self, uuid: &str) -> libnetman::Result<()> {
+        let Some(nm) = &self.nm else {
+            return Ok(());
+        };
+        nm.deactivate(uuid).await
+    }
+
+    fn clear_inflight_status(&mut self) {
+        if self
+            .status_message
+            .as_deref()
+            .is_some_and(is_inflight_status)
+        {
+            self.status_message = None;
         }
     }
+}
+
+/// Returns `true` for transient connect/disconnect status messages.
+fn is_inflight_status(message: &str) -> bool {
+    matches!(message, "Activating…" | "Deactivating…")
 }
 
 // ── List building helpers ─────────────────────────────────────────────────────

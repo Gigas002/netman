@@ -2,7 +2,7 @@ use libnetman::connection::{
     Connection, ConnectionKind, ConnectionStatus, NmState, WifiInfo, WifiMode, WifiSecurity,
 };
 
-use super::{ListItem, build_list_items};
+use super::{ListItem, build_list_items, is_inflight_status};
 
 fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
     Connection {
@@ -69,4 +69,12 @@ fn nm_state_label_connected_global() {
 #[test]
 fn connection_status_indicator_active() {
     assert_eq!(ConnectionStatus::Active.indicator(), '●');
+}
+
+#[test]
+fn inflight_status_messages() {
+    assert!(is_inflight_status("Activating…"));
+    assert!(is_inflight_status("Deactivating…"));
+    assert!(!is_inflight_status("Activation failed: no device"));
+    assert!(!is_inflight_status("Demo mode — connect not available"));
 }

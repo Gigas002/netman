@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 
 # D-Bus / NetworkManager integration (optional, behind the `dbus` feature)
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio-stream = { version = "0.1", default-features = false }
 
 # Binary-only
 anyhow = "1"

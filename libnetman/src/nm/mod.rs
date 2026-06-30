@@ -110,6 +110,40 @@ impl NmClient {
         Ok(())
     }
 
+    /// Subscribe to `ActiveConnection.StateChanged` signals.
+    ///
+    /// Returns a channel that receives a unit value each time any active
+    /// connection reports a state transition. The caller should refresh its
+    /// connection list when a message arrives.
+    pub async fn watch_active_state_changes(
+        &self,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<()>> {
+        use tokio_stream::StreamExt;
+        use zbus::{MatchRule, message::Type};
+
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .interface("org.freedesktop.NetworkManager.Connection.Active")?
+            .member("StateChanged")?
+            .build();
+
+        let mut stream = zbus::MessageStream::for_match_rule(rule, &self.conn, Some(64))
+            .await
+            .map_err(|e| Error::DBus(e.to_string()))?;
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            while stream.next().await.is_some() {
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
     /// Deactivate (disconnect) an active connection by UUID.
     pub async fn deactivate(&self, uuid: &str) -> Result<()> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;
