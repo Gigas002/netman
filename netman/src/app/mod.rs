@@ -1346,39 +1346,38 @@ impl App {
         if self.demo_mode {
             self.connection_editor = None;
             self.status_message = Some("Demo mode — save not available".into());
-            return;
-        }
-
-        #[cfg(feature = "dbus")]
-        if let Some(nm) = &self.nm {
-            let result = match editor.mode {
-                EditorMode::Edit => {
-                    let uuid = editor.uuid.clone().expect("edit mode requires uuid");
-                    let profile = editor.profile.clone();
-                    nm.update_connection_profile(&uuid, &profile)
-                        .await
-                        .map(|()| uuid)
-                }
-                EditorMode::New => {
-                    let profile = editor.profile.clone();
-                    let activate = editor.activate_on_save;
-                    nm.add_connection_profile(&profile, activate).await
-                }
-            };
-            match result {
-                Ok(_) => {
-                    let activating = editor.mode == EditorMode::New && editor.activate_on_save;
-                    self.connection_editor = None;
-                    self.status_message = Some(if activating {
-                        "Connection saved. Activating…".into()
-                    } else {
-                        "Connection saved.".into()
-                    });
-                    let _ = self.refresh().await;
-                }
-                Err(e) => {
-                    if let Some(ed) = &mut self.connection_editor {
-                        ed.error = Some(e.to_string());
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let result = match editor.mode {
+                    EditorMode::Edit => {
+                        let uuid = editor.uuid.clone().expect("edit mode requires uuid");
+                        let profile = editor.profile.clone();
+                        nm.update_connection_profile(&uuid, &profile)
+                            .await
+                            .map(|()| uuid)
+                    }
+                    EditorMode::New => {
+                        let profile = editor.profile.clone();
+                        let activate = editor.activate_on_save;
+                        nm.add_connection_profile(&profile, activate).await
+                    }
+                };
+                match result {
+                    Ok(_) => {
+                        let activating = editor.mode == EditorMode::New && editor.activate_on_save;
+                        self.connection_editor = None;
+                        self.status_message = Some(if activating {
+                            "Connection saved. Activating…".into()
+                        } else {
+                            "Connection saved.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => {
+                        if let Some(ed) = &mut self.connection_editor {
+                            ed.error = Some(e.to_string());
+                        }
                     }
                 }
             }
@@ -1489,17 +1488,16 @@ impl App {
 
         if !self.wireless_enabled {
             self.status_message = Some("Wi-Fi is disabled.".into());
-            return;
-        }
-
-        #[cfg(feature = "dbus")]
-        if let Some(nm) = &self.nm {
-            match nm.request_wifi_scan().await {
-                Ok(()) => match self.refresh().await {
-                    Ok(()) => self.status_message = None,
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                match nm.request_wifi_scan().await {
+                    Ok(()) => match self.refresh().await {
+                        Ok(()) => self.status_message = None,
+                        Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+                    },
                     Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
-                },
-                Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+                }
             }
         }
     }
@@ -1507,23 +1505,22 @@ impl App {
     async fn on_toggle_networking(&mut self) {
         if self.demo_mode {
             self.status_message = Some("Demo mode — toggle not available".into());
-            return;
-        }
-
-        #[cfg(feature = "dbus")]
-        if let Some(nm) = &self.nm {
-            let enabled = !self.networking_enabled;
-            match nm.set_networking_enabled(enabled).await {
-                Ok(()) => {
-                    self.networking_enabled = enabled;
-                    self.status_message = Some(if enabled {
-                        "Networking enabled.".into()
-                    } else {
-                        "Networking disabled.".into()
-                    });
-                    let _ = self.refresh().await;
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let enabled = !self.networking_enabled;
+                match nm.set_networking_enabled(enabled).await {
+                    Ok(()) => {
+                        self.networking_enabled = enabled;
+                        self.status_message = Some(if enabled {
+                            "Networking enabled.".into()
+                        } else {
+                            "Networking disabled.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
                 }
-                Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
             }
         }
     }
@@ -1531,23 +1528,22 @@ impl App {
     async fn on_toggle_wireless(&mut self) {
         if self.demo_mode {
             self.status_message = Some("Demo mode — toggle not available".into());
-            return;
-        }
-
-        #[cfg(feature = "dbus")]
-        if let Some(nm) = &self.nm {
-            let enabled = !self.wireless_enabled;
-            match nm.set_wireless_enabled(enabled).await {
-                Ok(()) => {
-                    self.wireless_enabled = enabled;
-                    self.status_message = Some(if enabled {
-                        "Wi-Fi enabled.".into()
-                    } else {
-                        "Wi-Fi disabled.".into()
-                    });
-                    let _ = self.refresh().await;
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let enabled = !self.wireless_enabled;
+                match nm.set_wireless_enabled(enabled).await {
+                    Ok(()) => {
+                        self.wireless_enabled = enabled;
+                        self.status_message = Some(if enabled {
+                            "Wi-Fi enabled.".into()
+                        } else {
+                            "Wi-Fi disabled.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
                 }
-                Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
             }
         }
     }
