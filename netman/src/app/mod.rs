@@ -91,6 +91,8 @@ pub async fn run(settings: Settings) -> Result<()> {
                                     Action::DeleteConnection(uuid) => {
                                         app.on_delete_connection(uuid).await
                                     }
+                                    #[cfg(feature = "mobile")]
+                                    Action::UnlockSim { pin } => app.on_unlock_sim(pin).await,
                                 }
                             }
                             Ok(Event::Paste(text)) => app.handle_paste(&text),
@@ -151,6 +153,9 @@ pub struct App {
     pub vpn_import_prompt: Option<VpnImportPrompt>,
     /// Delete saved profile confirmation overlay.
     pub delete_confirm_prompt: Option<DeleteConfirmPrompt>,
+    /// SIM PIN unlock overlay for locked mobile broadband modems.
+    #[cfg(feature = "mobile")]
+    pub pin_unlock_prompt: Option<PinUnlockPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
@@ -172,6 +177,25 @@ impl PasswordPrompt {
             security,
             input: TextInput::new(),
             show_password: false,
+            error: None,
+        }
+    }
+}
+
+/// State for the SIM PIN unlock modal.
+#[cfg(feature = "mobile")]
+pub struct PinUnlockPrompt {
+    pub label: String,
+    pub input: TextInput,
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "mobile")]
+impl PinUnlockPrompt {
+    pub fn new(label: String) -> Self {
+        Self {
+            label,
+            input: TextInput::new(),
             error: None,
         }
     }
@@ -724,6 +748,10 @@ enum Action {
         activate: bool,
     },
     DeleteConnection(String),
+    #[cfg(feature = "mobile")]
+    UnlockSim {
+        pin: String,
+    },
 }
 
 impl App {
@@ -753,6 +781,8 @@ impl App {
                         vpn_add_menu: None,
                         vpn_import_prompt: None,
                         delete_confirm_prompt: None,
+                        #[cfg(feature = "mobile")]
+                        pin_unlock_prompt: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -783,6 +813,8 @@ impl App {
             vpn_add_menu: None,
             vpn_import_prompt: None,
             delete_confirm_prompt: None,
+            #[cfg(feature = "mobile")]
+            pin_unlock_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -819,6 +851,8 @@ impl App {
                 self.selected = self.selected.min(conn_count - 1);
             }
             debug!(state = ?self.nm_state, items = self.items.len(), "refreshed");
+            #[cfg(feature = "mobile")]
+            self.maybe_show_pin_prompt();
         }
 
         Ok(())
@@ -844,6 +878,10 @@ impl App {
             return action;
         }
         if let Some(action) = self.handle_password_key(code, modifiers) {
+            return action;
+        }
+        #[cfg(feature = "mobile")]
+        if let Some(action) = self.handle_pin_unlock_key(code, modifiers) {
             return action;
         }
 
@@ -1178,6 +1216,32 @@ impl App {
         }
     }
 
+    #[cfg(feature = "mobile")]
+    fn handle_pin_unlock_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.pin_unlock_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.pin_unlock_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                if prompt.input.is_empty() {
+                    prompt.error = Some("PIN is required.".into());
+                    return Some(Action::Continue);
+                }
+                let pin = prompt.input.text().to_owned();
+                Some(Action::UnlockSim { pin })
+            }
+            _ => {
+                if prompt.input.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
     fn handle_paste(&mut self, text: &str) {
         if let Some(prompt) = &mut self.vpn_import_prompt {
             prompt.path.insert_str(text);
@@ -1197,6 +1261,11 @@ impl App {
             return;
         }
         if let Some(prompt) = &mut self.password_prompt {
+            prompt.input.insert_str(text);
+            prompt.error = None;
+        }
+        #[cfg(feature = "mobile")]
+        if let Some(prompt) = &mut self.pin_unlock_prompt {
             prompt.input.insert_str(text);
             prompt.error = None;
         }
@@ -1293,6 +1362,14 @@ impl App {
 
         if conn.is_active() {
             self.status_message = Some(format!("'{}' is already connected.", conn.label()));
+            return Action::Continue;
+        }
+
+        #[cfg(feature = "mobile")]
+        if let ConnectionKind::Modem(modem) = &conn.kind
+            && modem.sim_locked
+        {
+            self.pin_unlock_prompt = Some(PinUnlockPrompt::new(conn.label().to_owned()));
             return Action::Continue;
         }
 
@@ -1560,6 +1637,51 @@ impl App {
         }
         #[cfg(not(feature = "dbus"))]
         let _ = uuid;
+    }
+
+    #[cfg(feature = "mobile")]
+    async fn on_unlock_sim(&mut self, pin: String) {
+        if self.demo_mode {
+            self.pin_unlock_prompt = None;
+            self.status_message = Some("Demo mode — SIM unlock not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.send_sim_pin(&pin).await {
+                Ok(()) => {
+                    self.pin_unlock_prompt = None;
+                    self.status_message = Some("SIM unlocked.".into());
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.pin_unlock_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = pin;
+    }
+
+    #[cfg(feature = "mobile")]
+    fn maybe_show_pin_prompt(&mut self) {
+        if self.pin_unlock_prompt.is_some() {
+            return;
+        }
+        for item in &self.items {
+            let ListItem::Connection(conn) = item else {
+                continue;
+            };
+            if let ConnectionKind::Modem(modem) = &conn.kind
+                && modem.sim_locked
+            {
+                self.pin_unlock_prompt = Some(PinUnlockPrompt::new(conn.label().to_owned()));
+                return;
+            }
+        }
     }
 
     async fn on_deactivate(&mut self, uuid: &str) {
@@ -2092,6 +2214,11 @@ fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
             service_type: v.service_type.clone(),
             ..VpnProfile::default()
         }),
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(_) => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: "gsm".into(),
+        },
         ConnectionKind::Loopback => ConnectionProfile::Unsupported {
             id: conn.id.clone(),
             conn_type: "loopback".into(),
@@ -2146,13 +2273,17 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
     let mut wifi: Vec<Connection> = Vec::new();
     let mut ethernet: Vec<Connection> = Vec::new();
     let mut vpn: Vec<Connection> = Vec::new();
+    #[cfg(feature = "mobile")]
+    let mut mobile: Vec<Connection> = Vec::new();
     let mut other: Vec<Connection> = Vec::new();
 
     for c in connections {
         match &c.kind {
-            libnetman::connection::ConnectionKind::Wifi(_) => wifi.push(c),
-            libnetman::connection::ConnectionKind::Ethernet => ethernet.push(c),
-            libnetman::connection::ConnectionKind::Vpn(_) => vpn.push(c),
+            ConnectionKind::Wifi(_) => wifi.push(c),
+            ConnectionKind::Ethernet => ethernet.push(c),
+            ConnectionKind::Vpn(_) => vpn.push(c),
+            #[cfg(feature = "mobile")]
+            ConnectionKind::Modem(_) => mobile.push(c),
             _ => other.push(c),
         }
     }
@@ -2163,6 +2294,17 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
             .then_with(|| {
                 libnetman::connection::wifi_strength(b)
                     .cmp(&libnetman::connection::wifi_strength(a))
+            })
+            .then_with(|| a.label().cmp(b.label()))
+    });
+
+    #[cfg(feature = "mobile")]
+    mobile.sort_by(|a, b| {
+        b.is_active()
+            .cmp(&a.is_active())
+            .then_with(|| {
+                libnetman::connection::modem_strength(b)
+                    .cmp(&libnetman::connection::modem_strength(a))
             })
             .then_with(|| a.label().cmp(b.label()))
     });
@@ -2183,6 +2325,15 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
     if !vpn.is_empty() {
         items.push(ListItem::Header("VPN".into()));
         items.extend(vpn.into_iter().map(|c| ListItem::Connection(Box::new(c))));
+    }
+    #[cfg(feature = "mobile")]
+    if !mobile.is_empty() {
+        items.push(ListItem::Header("Mobile".into()));
+        items.extend(
+            mobile
+                .into_iter()
+                .map(|c| ListItem::Connection(Box::new(c))),
+        );
     }
     if !other.is_empty() {
         items.push(ListItem::Header("Other".into()));
@@ -2294,6 +2445,24 @@ fn demo_connections() -> Vec<ListItem> {
             ip4: None,
             ip6: None,
             device: None,
+            saved: true,
+        },
+        #[cfg(feature = "mobile")]
+        Connection {
+            id: "Mobile Broadband".into(),
+            uuid: "44444444-0000-0000-0000-000000000001".into(),
+            kind: ConnectionKind::Modem(libnetman::connection::ModemInfo {
+                apn: Some("internet".into()),
+                operator_name: Some("Demo Mobile".into()),
+                operator_code: Some("00101".into()),
+                signal_quality: 78,
+                access_technology: libnetman::connection::AccessTechnology::Lte,
+                sim_locked: false,
+            }),
+            status: ConnectionStatus::Inactive,
+            ip4: None,
+            ip6: None,
+            device: Some("wwan0".into()),
             saved: true,
         },
     ];

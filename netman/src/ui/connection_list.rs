@@ -216,6 +216,60 @@ fn build_connection_row<'a>(
             let vpn_label = Span::styled(" VPN", Style::default().fg(FG_DIM));
             ListItem::new(Line::from(vec![indicator, name, vpn_label]))
         }
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(modem) => {
+            let name_color = if disabled {
+                FG_DIM
+            } else if conn.is_active() {
+                FG_ACTIVE
+            } else if modem.sim_locked {
+                FG_WARN
+            } else {
+                Color::Reset
+            };
+            let name = Span::styled(
+                format!("{:<20}", truncate(&conn.id, 18)),
+                Style::default().fg(name_color),
+            );
+
+            let bar_color = if disabled {
+                FG_DIM
+            } else {
+                strength_color(modem.signal_quality)
+            };
+            let bar = Span::styled(modem.strength_bar(), Style::default().fg(bar_color));
+
+            let strength_pct = Span::styled(
+                format!(" {:>3}%", modem.signal_quality),
+                Style::default().fg(FG_DIM),
+            );
+
+            let tech = Span::styled(
+                format!(" {}", modem.access_technology.label()),
+                Style::default().fg(FG_DIM),
+            );
+
+            let operator = Span::styled(
+                format!(" {}", truncate(modem.operator_label(), 12)),
+                Style::default().fg(FG_DIM),
+            );
+
+            let lock = if modem.sim_locked {
+                Span::styled(" 🔒", Style::default().fg(FG_WARN))
+            } else {
+                Span::raw("   ")
+            };
+
+            ListItem::new(Line::from(vec![
+                indicator,
+                name,
+                bar,
+                strength_pct,
+                tech,
+                operator,
+                lock,
+            ]))
+        }
         _ => {
             let name = Span::raw(format!(" {}", truncate(&conn.id, 30)));
             ListItem::new(Line::from(name))

@@ -65,6 +65,8 @@ pub enum ConnectionKind {
     Wifi(WifiInfo),
     Ethernet,
     Vpn(VpnInfo),
+    #[cfg(feature = "mobile")]
+    Modem(ModemInfo),
     Loopback,
     Other(String),
 }
@@ -76,6 +78,8 @@ impl ConnectionKind {
             Self::Wifi(_) => "Wi-Fi",
             Self::Ethernet => "Ethernet",
             Self::Vpn(_) => "VPN",
+            #[cfg(feature = "mobile")]
+            Self::Modem(_) => "Mobile",
             Self::Loopback => "Loopback",
             Self::Other(t) => t.as_str(),
         }
@@ -179,6 +183,69 @@ pub enum WifiMode {
 pub struct VpnInfo {
     /// VPN service type (e.g. `org.freedesktop.NetworkManager.openvpn`).
     pub service_type: String,
+}
+
+// ── ModemInfo ─────────────────────────────────────────────────────────────────
+
+/// Mobile broadband access technology label.
+#[cfg(feature = "mobile")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessTechnology {
+    Unknown,
+    Gsm,
+    Umts,
+    Lte,
+    Nr5G,
+}
+
+#[cfg(feature = "mobile")]
+impl AccessTechnology {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Gsm => "GSM",
+            Self::Umts => "3G",
+            Self::Lte => "4G",
+            Self::Nr5G => "5G",
+        }
+    }
+}
+
+/// Mobile broadband (GSM / LTE / 5G) connection data.
+#[cfg(feature = "mobile")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModemInfo {
+    /// Access Point Name from the connection profile or live session.
+    pub apn: Option<String>,
+    /// Mobile network operator name (from ModemManager when available).
+    pub operator_name: Option<String>,
+    /// MCC+MNC operator code (from NM or ModemManager).
+    pub operator_code: Option<String>,
+    /// Signal quality 0–100.
+    pub signal_quality: u8,
+    /// Current radio access technology.
+    pub access_technology: AccessTechnology,
+    /// Whether the SIM requires a PIN before use.
+    pub sim_locked: bool,
+}
+
+#[cfg(feature = "mobile")]
+impl ModemInfo {
+    /// Renders signal strength as a bar: `▁▂▃▄▅▆▇█` (4-character wide).
+    pub fn strength_bar(&self) -> String {
+        let bars = (self.signal_quality as usize * 4 / 100).min(4);
+        let filled = "█".repeat(bars);
+        let empty = "░".repeat(4 - bars);
+        format!("{filled}{empty}")
+    }
+
+    /// Short operator label for list display.
+    pub fn operator_label(&self) -> &str {
+        self.operator_name
+            .as_deref()
+            .or(self.operator_code.as_deref())
+            .unwrap_or("Mobile")
+    }
 }
 
 // ── ConnectionStatus ──────────────────────────────────────────────────────────
@@ -296,6 +363,65 @@ pub fn merge_wifi_scan_data(connections: &mut Vec<Connection>, access_points: Ve
             saved: false,
         });
     }
+}
+
+/// Returns mobile signal strength for sorting, or 0 for non-mobile entries.
+#[cfg(feature = "mobile")]
+pub fn modem_strength(conn: &Connection) -> u8 {
+    match &conn.kind {
+        ConnectionKind::Modem(m) => m.signal_quality,
+        _ => 0,
+    }
+}
+
+/// Merge live modem device data into saved GSM connections.
+#[cfg(feature = "mobile")]
+pub fn merge_modem_live_data(connections: &mut [Connection], live: &[ModemLiveData]) {
+    let fallback = live.first().filter(|_| live.len() == 1);
+
+    for conn in connections.iter_mut() {
+        let ConnectionKind::Modem(modem) = &mut conn.kind else {
+            continue;
+        };
+        let device = conn.device.as_deref();
+        let data = live
+            .iter()
+            .find(|d| device.is_some_and(|dev| dev == d.interface.as_str()))
+            .or(fallback);
+        let Some(data) = data else {
+            continue;
+        };
+        apply_modem_live(modem, data);
+    }
+}
+
+#[cfg(feature = "mobile")]
+fn apply_modem_live(modem: &mut ModemInfo, data: &ModemLiveData) {
+    if let Some(apn) = &data.apn {
+        modem.apn = Some(apn.clone());
+    }
+    if let Some(name) = &data.operator_name {
+        modem.operator_name = Some(name.clone());
+    }
+    if let Some(code) = &data.operator_code {
+        modem.operator_code = Some(code.clone());
+    }
+    modem.signal_quality = data.signal_quality;
+    modem.access_technology = data.access_technology;
+    modem.sim_locked = data.sim_locked;
+}
+
+/// Live modem device data fetched from NM / ModemManager.
+#[cfg(feature = "mobile")]
+#[derive(Debug, Clone)]
+pub struct ModemLiveData {
+    pub interface: String,
+    pub apn: Option<String>,
+    pub operator_name: Option<String>,
+    pub operator_code: Option<String>,
+    pub signal_quality: u8,
+    pub access_technology: AccessTechnology,
+    pub sim_locked: bool,
 }
 
 /// Returns Wi-Fi signal strength for sorting, or 0 for non-Wi-Fi entries.

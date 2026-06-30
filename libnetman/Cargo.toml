@@ -11,6 +11,8 @@ repository.workspace = true
 [features]
 default = []
 dbus = ["dep:zbus", "dep:tokio", "dep:tokio-stream", "dep:uuid"]
+# Mobile broadband (GSM / LTE / 5G) via ModemManager.
+mobile = ["dbus"]
 
 [dependencies]
 thiserror.workspace = true

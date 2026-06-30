@@ -154,3 +154,34 @@ fn editor_fields_vary_by_connection_type() {
     assert!(vpn.contains(&EditorFieldId::VpnPort));
     assert!(vpn.contains(&EditorFieldId::VpnServiceType));
 }
+
+#[cfg(feature = "mobile")]
+#[test]
+fn build_list_items_includes_mobile_section() {
+    use libnetman::connection::{AccessTechnology, ModemInfo};
+
+    let conns = vec![Connection {
+        id: "LTE".into(),
+        uuid: "uuid-lte".into(),
+        kind: ConnectionKind::Modem(ModemInfo {
+            apn: Some("internet".into()),
+            operator_name: Some("Carrier".into()),
+            operator_code: None,
+            signal_quality: 80,
+            access_technology: AccessTechnology::Lte,
+            sim_locked: false,
+        }),
+        status: ConnectionStatus::Inactive,
+        ip4: None,
+        ip6: None,
+        device: Some("wwan0".into()),
+        saved: true,
+    }];
+
+    let items = build_list_items(conns);
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, ListItem::Header(h) if h == "Mobile"))
+    );
+}

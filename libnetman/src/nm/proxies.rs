@@ -255,3 +255,82 @@ pub trait Ip6Config {
     #[zbus(property)]
     fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
 }
+
+// ── org.freedesktop.NetworkManager.Device.Modem ───────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.Device.Modem",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+pub trait DeviceModem {
+    /// Supported modem capabilities (NMDeviceModemCapabilities bitmask).
+    #[zbus(property)]
+    fn modem_capabilities(&self) -> zbus::Result<u32>;
+
+    /// Currently active modem capabilities.
+    #[zbus(property)]
+    fn current_capabilities(&self) -> zbus::Result<u32>;
+
+    /// ModemManager device ID (object path since NM 1.20).
+    #[zbus(property)]
+    fn device_id(&self) -> zbus::Result<String>;
+
+    /// MCC+MNC operator code when connected.
+    #[zbus(property)]
+    fn operator_code(&self) -> zbus::Result<String>;
+
+    /// Active APN when connected.
+    #[zbus(property)]
+    fn apn(&self) -> zbus::Result<String>;
+}
+
+// ── org.freedesktop.ModemManager1.Modem ───────────────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Modem",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmModem {
+    /// Signal quality (0–100) and whether the value is recent.
+    #[zbus(property)]
+    fn signal_quality(&self) -> zbus::Result<(u32, bool)>;
+
+    /// Unlock type required (MMModemLock enum as u32).
+    #[zbus(property)]
+    fn unlock_required(&self) -> zbus::Result<u32>;
+
+    /// SIM object path.
+    #[zbus(property)]
+    fn sim(&self) -> zbus::Result<OwnedObjectPath>;
+
+    /// Current access technologies bitmask.
+    #[zbus(property)]
+    fn access_technologies(&self) -> zbus::Result<u32>;
+}
+
+// ── org.freedesktop.ModemManager1.Modem.Modem3gpp ─────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Modem.Modem3gpp",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmModem3gpp {
+    /// Human-readable operator name.
+    #[zbus(property)]
+    fn operator_name(&self) -> zbus::Result<String>;
+}
+
+// ── org.freedesktop.ModemManager1.Sim ─────────────────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Sim",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmSim {
+    /// Send the SIM PIN to unlock the card.
+    fn send_pin(&self, pin: &str) -> zbus::Result<()>;
+}

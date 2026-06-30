@@ -7,6 +7,8 @@
 //! service and presents the results as the domain types from [`crate::connection`].
 
 mod connection_settings;
+#[cfg(feature = "mobile")]
+mod modem;
 mod proxies;
 mod wifi_settings;
 
@@ -131,6 +133,12 @@ impl NmClient {
             merge_wifi_scan_data(&mut results, access_points);
         }
 
+        #[cfg(feature = "mobile")]
+        {
+            let live = modem::fetch_modem_live_data(&self.conn).await;
+            crate::connection::merge_modem_live_data(&mut results, &live);
+        }
+
         results.sort_by(|a, b| {
             b.is_active()
                 .cmp(&a.is_active())
@@ -181,6 +189,12 @@ impl NmClient {
         nm.add_and_activate_connection(settings, device.as_str(), "/")
             .await?;
         Ok(())
+    }
+
+    #[cfg(feature = "mobile")]
+    /// Send a SIM PIN to unlock a locked mobile broadband modem.
+    pub async fn send_sim_pin(&self, pin: &str) -> Result<()> {
+        modem::send_sim_pin(&self.conn, pin).await
     }
 
     /// Subscribe to `ActiveConnection.StateChanged` signals.
@@ -533,6 +547,8 @@ impl NmClient {
                     get_str_field(raw, "vpn", "service-type").unwrap_or_else(|| "unknown".into());
                 ConnectionKind::Vpn(VpnInfo { service_type })
             }
+            #[cfg(feature = "mobile")]
+            "gsm" => ConnectionKind::Modem(modem::build_modem_info(raw)),
             "loopback" => ConnectionKind::Loopback,
             other => ConnectionKind::Other(other.to_owned()),
         }
@@ -732,8 +748,22 @@ fn kind_order(kind: &ConnectionKind) -> u8 {
         ConnectionKind::Wifi(_) => 0,
         ConnectionKind::Ethernet => 1,
         ConnectionKind::Vpn(_) => 2,
-        ConnectionKind::Loopback => 3,
-        ConnectionKind::Other(_) => 4,
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(_) => 3,
+        ConnectionKind::Loopback => {
+            if cfg!(feature = "mobile") {
+                4
+            } else {
+                3
+            }
+        }
+        ConnectionKind::Other(_) => {
+            if cfg!(feature = "mobile") {
+                5
+            } else {
+                4
+            }
+        }
     }
 }
 

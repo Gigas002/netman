@@ -124,6 +124,28 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
                 .unwrap_or(&vpn.service_type);
             field(&mut lines, "Plugin", short_type);
         }
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(modem) => {
+            field(&mut lines, "Type", "Mobile");
+            if let Some(apn) = &modem.apn {
+                field(&mut lines, "APN", apn);
+            }
+            if let Some(name) = &modem.operator_name {
+                field(&mut lines, "Operator", name);
+            }
+            if let Some(code) = &modem.operator_code {
+                field(&mut lines, "MCC+MNC", code);
+            }
+            field(&mut lines, "Technology", modem.access_technology.label());
+            field(
+                &mut lines,
+                "Signal",
+                &format!("{}% {}", modem.signal_quality, modem.strength_bar()),
+            );
+            if modem.sim_locked {
+                field(&mut lines, "SIM", "PIN required");
+            }
+        }
         ConnectionKind::Loopback => {
             field(&mut lines, "Type", "Loopback");
         }

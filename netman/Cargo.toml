@@ -12,6 +12,8 @@ repository.workspace = true
 default = ["dbus"]
 # Enables live NetworkManager interaction via D-Bus.
 dbus = ["libnetman/dbus"]
+# Mobile broadband (GSM / LTE / 5G) support.
+mobile = ["libnetman/mobile"]
 
 [dependencies]
 libnetman = { path = "../libnetman", version = "0.1.0" }
