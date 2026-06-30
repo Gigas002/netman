@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use zbus::zvariant::{OwnedValue, Value};
 
+use super::{apply_profile, parse_profile, profile_to_settings};
 use crate::connection::{
     ConnectionProfile, EthernetProfile, IpMethod, Ipv4Profile, WifiProfile, WifiSecurity,
 };
-use super::{apply_profile, parse_profile};
 
 fn str_value(s: &str) -> OwnedValue {
     Value::from(s).try_into().unwrap()
@@ -103,6 +103,7 @@ fn parse_ethernet_profile() {
     let ConnectionProfile::Ethernet(e) = profile else {
         panic!("expected ethernet");
     };
+    assert_eq!(e.name, "Wired");
     assert_eq!(e.mtu, "9000");
     assert_eq!(e.ipv4.method, IpMethod::Auto);
 }
@@ -137,6 +138,7 @@ fn ethernet_round_trip_mtu() {
     );
 
     let profile = ConnectionProfile::Ethernet(EthernetProfile {
+        name: "Wired".into(),
         ipv4: Ipv4Profile::default(),
         mtu: "1500".into(),
         cloned_mac: String::new(),
@@ -147,4 +149,34 @@ fn ethernet_round_trip_mtu() {
         panic!("expected ethernet");
     };
     assert_eq!(e.mtu, "1500");
+}
+
+#[test]
+fn profile_to_settings_builds_new_wifi() {
+    let profile = ConnectionProfile::Wifi(WifiProfile {
+        ssid: "NewNet".into(),
+        security: WifiSecurity::Wpa2,
+        psk: "secret".into(),
+        hidden: false,
+        ipv4: Ipv4Profile::default(),
+    });
+    let settings = profile_to_settings(&profile).unwrap();
+    let reparsed = parse_profile(&settings, None);
+    let ConnectionProfile::Wifi(w) = reparsed else {
+        panic!("expected wifi");
+    };
+    assert_eq!(w.ssid, "NewNet");
+    assert_eq!(w.security, WifiSecurity::Wpa2);
+}
+
+#[test]
+fn profile_to_settings_rejects_secured_wifi_without_password() {
+    let profile = ConnectionProfile::Wifi(WifiProfile {
+        ssid: "NewNet".into(),
+        security: WifiSecurity::Wpa2,
+        psk: String::new(),
+        hidden: false,
+        ipv4: Ipv4Profile::default(),
+    });
+    assert!(profile_to_settings(&profile).is_err());
 }

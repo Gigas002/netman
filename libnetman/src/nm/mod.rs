@@ -26,7 +26,7 @@ use crate::{
     },
     error::Error,
 };
-use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile};
+use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile, profile_to_settings};
 use proxies::{
     AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
     NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
@@ -238,6 +238,32 @@ impl NmClient {
             .await?;
         sc.update2(updated, UPDATE2_TO_DISK).await?;
         Ok(())
+    }
+
+    /// Add a new connection profile via `Settings::AddConnection`.
+    ///
+    /// Returns the UUID of the created profile. When `activate` is `true`, the
+    /// connection is activated immediately after creation.
+    pub async fn add_connection_profile(
+        &self,
+        profile: &ConnectionProfile,
+        activate: bool,
+    ) -> Result<String> {
+        let settings = profile_to_settings(profile)?;
+        let nm_settings = SettingsProxy::new(&self.conn).await?;
+        let path = nm_settings.add_connection(settings).await?;
+        let sc = SettingsConnectionProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        let raw = sc.get_settings().await?;
+        let uuid = get_str_field(&raw, "connection", "uuid")
+            .ok_or_else(|| Error::OperationFailed("new connection has no UUID".into()))?;
+        if activate {
+            self.activate(&uuid).await?;
+        }
+        Ok(uuid)
     }
 
     /// Deactivate (disconnect) an active connection by UUID.

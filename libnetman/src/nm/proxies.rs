@@ -79,6 +79,12 @@ pub trait Settings {
 
     /// Return the object path for the connection with the given UUID.
     fn get_connection_by_uuid(&self, uuid: &str) -> zbus::Result<OwnedObjectPath>;
+
+    /// Add a new connection profile from settings.
+    fn add_connection(
+        &self,
+        connection: HashMap<String, HashMap<String, OwnedValue>>,
+    ) -> zbus::Result<OwnedObjectPath>;
 }
 
 // ── org.freedesktop.NetworkManager.Settings.Connection ───────────────────────

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use uuid::Uuid;
 use zbus::zvariant::{OwnedValue, Value};
 
 use crate::{
@@ -45,7 +46,7 @@ pub fn apply_profile(
     let mut settings = raw.clone();
 
     match profile {
-        ConnectionProfile::Wifi(w) => apply_wifi(&mut settings, w)?,
+        ConnectionProfile::Wifi(w) => apply_wifi(&mut settings, w, false)?,
         ConnectionProfile::Ethernet(e) => apply_ethernet(&mut settings, e)?,
         ConnectionProfile::Vpn(v) => apply_vpn(&mut settings, v)?,
         ConnectionProfile::Unsupported { .. } => {
@@ -56,6 +57,91 @@ pub fn apply_profile(
     }
 
     Ok(settings)
+}
+
+/// Build a complete NM settings dict for a new connection profile.
+pub fn profile_to_settings(
+    profile: &ConnectionProfile,
+) -> Result<HashMap<String, HashMap<String, OwnedValue>>> {
+    validate_new_profile(profile)?;
+
+    let mut settings: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+    let mut connection = HashMap::new();
+    connection.insert("uuid".into(), str_value(&Uuid::new_v4().to_string()));
+
+    match profile {
+        ConnectionProfile::Wifi(w) => {
+            connection.insert("type".into(), str_value("802-11-wireless"));
+            connection.insert("id".into(), str_value(&w.ssid));
+        }
+        ConnectionProfile::Ethernet(e) => {
+            connection.insert("type".into(), str_value("802-3-ethernet"));
+            connection.insert("id".into(), str_value(e.name.trim()));
+        }
+        ConnectionProfile::Vpn(v) => {
+            connection.insert("type".into(), str_value("vpn"));
+            connection.insert("id".into(), str_value(v.name.trim()));
+        }
+        ConnectionProfile::Unsupported { .. } => {
+            return Err(Error::OperationFailed(
+                "this connection type cannot be created".into(),
+            ));
+        }
+    }
+    settings.insert("connection".into(), connection);
+
+    let mut ipv6 = HashMap::new();
+    ipv6.insert("method".into(), str_value("ignore"));
+    settings.insert("ipv6".into(), ipv6);
+
+    match profile {
+        ConnectionProfile::Wifi(w) => apply_wifi(&mut settings, w, true)?,
+        ConnectionProfile::Ethernet(e) => apply_ethernet(&mut settings, e)?,
+        ConnectionProfile::Vpn(v) => apply_vpn(&mut settings, v)?,
+        ConnectionProfile::Unsupported { .. } => unreachable!(),
+    }
+
+    Ok(settings)
+}
+
+fn validate_new_profile(profile: &ConnectionProfile) -> Result<()> {
+    match profile {
+        ConnectionProfile::Wifi(w) => {
+            if w.ssid.trim().is_empty() {
+                return Err(Error::OperationFailed("SSID must not be empty".into()));
+            }
+            if w.security.is_secured() && w.psk.is_empty() {
+                return Err(Error::OperationFailed(
+                    "Password is required for secured networks".into(),
+                ));
+            }
+        }
+        ConnectionProfile::Ethernet(e) => {
+            if e.name.trim().is_empty() {
+                return Err(Error::OperationFailed(
+                    "Connection name must not be empty".into(),
+                ));
+            }
+        }
+        ConnectionProfile::Vpn(v) => {
+            if v.name.trim().is_empty() {
+                return Err(Error::OperationFailed(
+                    "Connection name must not be empty".into(),
+                ));
+            }
+            if v.service_type.trim().is_empty() {
+                return Err(Error::OperationFailed(
+                    "VPN service type must not be empty".into(),
+                ));
+            }
+        }
+        ConnectionProfile::Unsupported { .. } => {
+            return Err(Error::OperationFailed(
+                "this connection type cannot be created".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_wifi(
@@ -96,6 +182,7 @@ fn parse_wifi(
 }
 
 fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> EthernetProfile {
+    let name = get_str_field(raw, "connection", "id").unwrap_or_default();
     let eth = raw.get("802-3-ethernet");
     let mtu = eth
         .and_then(|s| get_u32_value(s, "mtu"))
@@ -106,6 +193,7 @@ fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Etherne
         .unwrap_or_default();
 
     EthernetProfile {
+        name,
         ipv4: parse_ipv4(raw),
         mtu,
         cloned_mac,
@@ -114,6 +202,7 @@ fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Etherne
 
 fn parse_vpn(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> VpnProfile {
     VpnProfile {
+        name: get_str_field(raw, "connection", "id").unwrap_or_default(),
         service_type: get_str_field(raw, "vpn", "service-type").unwrap_or_default(),
         ipv4: parse_ipv4(raw),
     }
@@ -159,6 +248,7 @@ fn parse_ipv4(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv4Profile
 fn apply_wifi(
     settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
     wifi: &WifiProfile,
+    for_new: bool,
 ) -> Result<()> {
     if wifi.ssid.is_empty() {
         return Err(Error::OperationFailed("SSID must not be empty".into()));
@@ -169,14 +259,17 @@ fn apply_wifi(
             wifi.security.label()
         )));
     }
-    if wifi.security.is_secured() && wifi.psk.is_empty() {
-        // Allow empty PSK when updating other fields — only validate on explicit change
-        // by checking if security section exists; NM keeps existing secret.
+    if for_new && wifi.security.is_secured() && wifi.psk.is_empty() {
+        return Err(Error::OperationFailed(
+            "Password is required for secured networks".into(),
+        ));
     }
 
-    let wireless = settings
-        .entry("802-11-wireless".into())
-        .or_default();
+    if let Some(connection) = settings.get_mut("connection") {
+        connection.insert("id".into(), str_value(&wifi.ssid));
+    }
+
+    let wireless = settings.entry("802-11-wireless".into()).or_default();
     wireless.insert("ssid".into(), bytes_value(wifi.ssid.as_bytes()));
     wireless.insert("mode".into(), str_value("infrastructure"));
     if wifi.hidden {
@@ -215,9 +308,13 @@ fn apply_ethernet(
     settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
     eth: &EthernetProfile,
 ) -> Result<()> {
-    let section = settings
-        .entry("802-3-ethernet".into())
-        .or_default();
+    if let Some(connection) = settings.get_mut("connection")
+        && !eth.name.trim().is_empty()
+    {
+        connection.insert("id".into(), str_value(eth.name.trim()));
+    }
+
+    let section = settings.entry("802-3-ethernet".into()).or_default();
     if eth.mtu.trim().is_empty() {
         section.remove("mtu");
     } else {
@@ -245,8 +342,22 @@ fn apply_vpn(
     settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
     vpn: &VpnProfile,
 ) -> Result<()> {
+    if vpn.service_type.trim().is_empty() {
+        return Err(Error::OperationFailed(
+            "VPN service type must not be empty".into(),
+        ));
+    }
+
+    if let Some(connection) = settings.get_mut("connection")
+        && !vpn.name.trim().is_empty()
+    {
+        connection.insert("id".into(), str_value(vpn.name.trim()));
+    }
+
+    let section = settings.entry("vpn".into()).or_default();
+    section.insert("service-type".into(), str_value(vpn.service_type.trim()));
+
     apply_ipv4(settings, &vpn.ipv4)?;
-    let _ = vpn.service_type;
     Ok(())
 }
 
@@ -348,9 +459,7 @@ fn get_legacy_address(section: &HashMap<String, OwnedValue>) -> Option<(String, 
 fn get_dns_data(section: &HashMap<String, OwnedValue>) -> Option<String> {
     let data = section.get("dns-data")?;
     let entries: Vec<HashMap<String, OwnedValue>> = Vec::try_from(data.try_clone().ok()?).ok()?;
-    entries
-        .first()
-        .and_then(|e| get_str_value(e, "address"))
+    entries.first().and_then(|e| get_str_value(e, "address"))
 }
 
 fn get_legacy_dns(section: &HashMap<String, OwnedValue>) -> Option<String> {

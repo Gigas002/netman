@@ -61,7 +61,11 @@ pub fn render(frame: &mut Frame, area: Rect, editor: &ConnectionEditor) {
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" Edit: {} ", editor.title))
+                .title(format!(
+                    " {}: {} ",
+                    if editor.is_new() { "Add" } else { "Edit" },
+                    editor.title
+                ))
                 .border_style(Style::default().fg(FG_ACCENT)),
         ),
         overlay,
@@ -85,7 +89,7 @@ fn field_value(
     focused: bool,
     width: u16,
 ) -> Line<'static> {
-    if field.is_text() {
+    if field.is_text(editor.is_new()) {
         let input = editor.inputs.get(&field);
         let secret = field.is_secret();
         if let Some(input) = input {
@@ -119,7 +123,7 @@ mod tests {
             hidden: false,
             ipv4: Ipv4Profile::default(),
         });
-        let fields = editor_fields_for(&profile);
+        let fields = editor_fields_for(&profile, false);
         assert!(fields.contains(&EditorFieldId::Ssid));
         assert!(fields.contains(&EditorFieldId::IpMethod));
     }

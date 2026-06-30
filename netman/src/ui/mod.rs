@@ -6,6 +6,7 @@
 //! entry point called from the event loop: it lays out the frame and delegates
 //! to each element's render function.
 
+mod add_connection_menu;
 mod connection_editor;
 mod connection_list;
 mod detail_panel;
@@ -84,6 +85,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         hidden_network_prompt::render(frame, area, prompt);
     }
 
+    if let Some(menu) = &app.add_connection_menu {
+        add_connection_menu::render(frame, area, menu);
+    }
+
     if let Some(editor) = &app.connection_editor {
         connection_editor::render(frame, area, editor);
     }
@@ -97,6 +102,7 @@ fn render_key_hints(frame: &mut Frame, area: Rect, app: &App) {
         ("Enter", "Connect"),
         ("d", "Disconnect"),
         ("e", "Edit"),
+        ("a", "Add"),
         ("r", "Scan"),
         ("n", "Net"),
         ("w", "Wi-Fi"),
@@ -159,6 +165,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::raw("  Enter       Connect to selected network"),
         Line::raw("  d / Del     Disconnect selected network"),
         Line::raw("  e           Edit selected saved profile"),
+        Line::raw("  a           Add new connection"),
         Line::raw("  r / F5      Scan for Wi-Fi networks"),
         Line::raw("  n           Toggle networking on/off"),
         Line::raw("  w           Toggle Wi-Fi radio on/off"),

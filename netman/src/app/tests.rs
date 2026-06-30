@@ -3,7 +3,7 @@ use libnetman::connection::{
     NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
 };
 
-use super::{ListItem, build_list_items, editor_fields_for, is_inflight_status, EditorFieldId};
+use super::{EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status};
 
 fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
     Connection {
@@ -95,27 +95,49 @@ fn inflight_status_messages() {
 
 #[test]
 fn editor_fields_vary_by_connection_type() {
-    let wifi = editor_fields_for(&ConnectionProfile::Wifi(WifiProfile {
-        ssid: "x".into(),
-        security: WifiSecurity::Wpa2,
-        psk: String::new(),
-        hidden: false,
-        ipv4: Ipv4Profile::default(),
-    }));
+    let wifi = editor_fields_for(
+        &ConnectionProfile::Wifi(WifiProfile {
+            ssid: "x".into(),
+            security: WifiSecurity::Wpa2,
+            psk: String::new(),
+            hidden: false,
+            ipv4: Ipv4Profile::default(),
+        }),
+        false,
+    );
     assert!(wifi.contains(&EditorFieldId::Ssid));
     assert!(!wifi.contains(&EditorFieldId::Mtu));
 
-    let eth = editor_fields_for(&ConnectionProfile::Ethernet(EthernetProfile {
-        ipv4: Ipv4Profile::default(),
-        mtu: String::new(),
-        cloned_mac: String::new(),
-    }));
-    assert!(eth.contains(&EditorFieldId::Mtu));
-    assert!(!eth.contains(&EditorFieldId::Ssid));
+    let eth = editor_fields_for(
+        &ConnectionProfile::Ethernet(EthernetProfile {
+            name: "eth".into(),
+            ipv4: Ipv4Profile::default(),
+            mtu: String::new(),
+            cloned_mac: String::new(),
+        }),
+        false,
+    );
+    assert!(eth.contains(&EditorFieldId::ConnectionName));
+    assert!(!eth.contains(&EditorFieldId::Activate));
 
-    let vpn = editor_fields_for(&ConnectionProfile::Vpn(VpnProfile {
-        service_type: "org.freedesktop.NetworkManager.openvpn".into(),
-        ipv4: Ipv4Profile::default(),
-    }));
+    let eth_new = editor_fields_for(
+        &ConnectionProfile::Ethernet(EthernetProfile {
+            name: "eth".into(),
+            ipv4: Ipv4Profile::default(),
+            mtu: String::new(),
+            cloned_mac: String::new(),
+        }),
+        true,
+    );
+    assert!(eth_new.contains(&EditorFieldId::Activate));
+
+    let vpn = editor_fields_for(
+        &ConnectionProfile::Vpn(VpnProfile {
+            name: "vpn".into(),
+            service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+            ipv4: Ipv4Profile::default(),
+        }),
+        false,
+    );
     assert!(vpn.contains(&EditorFieldId::VpnServiceType));
 }

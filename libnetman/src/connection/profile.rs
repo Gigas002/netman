@@ -89,6 +89,8 @@ pub struct WifiProfile {
 /// Editable Ethernet profile fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EthernetProfile {
+    /// Connection display name (NM `connection.id`).
+    pub name: String,
     pub ipv4: Ipv4Profile,
     /// Empty string means leave MTU unchanged / default.
     pub mtu: String,
@@ -99,6 +101,8 @@ pub struct EthernetProfile {
 /// Editable VPN profile fields (plugin-specific data deferred).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VpnProfile {
+    /// Connection display name (NM `connection.id`).
+    pub name: String,
     pub service_type: String,
     pub ipv4: Ipv4Profile,
 }
