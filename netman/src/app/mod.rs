@@ -88,6 +88,9 @@ pub async fn run(settings: Settings) -> Result<()> {
                                         path,
                                         activate,
                                     } => app.on_import_vpn(plugin_name, path, activate).await,
+                                    Action::DeleteConnection(uuid) => {
+                                        app.on_delete_connection(uuid).await
+                                    }
                                 }
                             }
                             Ok(Event::Paste(text)) => app.handle_paste(&text),
@@ -146,6 +149,8 @@ pub struct App {
     pub vpn_add_menu: Option<VpnAddMenu>,
     /// VPN file import overlay.
     pub vpn_import_prompt: Option<VpnImportPrompt>,
+    /// Delete saved profile confirmation overlay.
+    pub delete_confirm_prompt: Option<DeleteConfirmPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
     state_watcher: StateChangeWaiter,
@@ -217,6 +222,23 @@ impl HiddenNetworkPrompt {
             HiddenPromptField::Ssid => HiddenPromptField::Password,
             HiddenPromptField::Password => HiddenPromptField::Ssid,
         };
+    }
+}
+
+/// State for the delete-connection confirmation modal.
+pub struct DeleteConfirmPrompt {
+    pub uuid: String,
+    pub label: String,
+    pub error: Option<String>,
+}
+
+impl DeleteConfirmPrompt {
+    pub fn new(uuid: String, label: String) -> Self {
+        Self {
+            uuid,
+            label,
+            error: None,
+        }
     }
 }
 
@@ -620,6 +642,7 @@ enum Action {
         path: String,
         activate: bool,
     },
+    DeleteConnection(String),
 }
 
 impl App {
@@ -648,6 +671,7 @@ impl App {
                         add_connection_menu: None,
                         vpn_add_menu: None,
                         vpn_import_prompt: None,
+                        delete_confirm_prompt: None,
                         nm: Some(nm),
                         state_watcher,
                     };
@@ -677,6 +701,7 @@ impl App {
             add_connection_menu: None,
             vpn_add_menu: None,
             vpn_import_prompt: None,
+            delete_confirm_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
             state_watcher: {
@@ -719,6 +744,9 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        if let Some(action) = self.handle_delete_confirm_key(code, modifiers) {
+            return action;
+        }
         if let Some(action) = self.handle_connection_editor_key(code, modifiers) {
             return action;
         }
@@ -749,7 +777,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Enter => return self.connect_selected(),
-            KeyCode::Char('d') | KeyCode::Delete => return self.disconnect_selected(),
+            KeyCode::Char('d') => return self.disconnect_selected(),
+            KeyCode::Delete => return self.disconnect_selected(),
+            KeyCode::Char('D') => return self.delete_selected(),
             KeyCode::Char('r') | KeyCode::F(5) => {
                 if !self.wireless_enabled {
                     self.status_message = Some("Wi-Fi is disabled.".into());
@@ -765,6 +795,26 @@ impl App {
             _ => {}
         }
         Action::Continue
+    }
+
+    fn handle_delete_confirm_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let prompt = self.delete_confirm_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.delete_confirm_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let uuid = prompt.uuid.clone();
+                Some(Action::DeleteConnection(uuid))
+            }
+            _ => Some(Action::Continue),
+        }
     }
 
     fn handle_connection_editor_key(
@@ -1189,6 +1239,53 @@ impl App {
 
         self.status_message = Some("Deactivating…".into());
         Action::Deactivate(conn.uuid)
+    }
+
+    fn delete_selected(&mut self) -> Action {
+        if matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect)) {
+            return Action::Continue;
+        }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_saved() {
+            self.status_message = Some("Only saved profiles can be deleted.".into());
+            return Action::Continue;
+        }
+
+        self.delete_confirm_prompt = Some(DeleteConfirmPrompt::new(
+            conn.uuid.clone(),
+            conn.label().to_owned(),
+        ));
+        Action::Continue
+    }
+
+    async fn on_delete_connection(&mut self, uuid: String) {
+        if self.demo_mode {
+            self.delete_confirm_prompt = None;
+            self.status_message = Some("Demo mode — delete not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.delete_connection(&uuid).await {
+                Ok(()) => {
+                    self.delete_confirm_prompt = None;
+                    self.status_message = Some("Connection deleted.".into());
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.delete_confirm_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
     }
 
     fn edit_selected(&mut self) -> Action {

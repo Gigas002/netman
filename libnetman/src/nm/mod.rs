@@ -308,6 +308,19 @@ impl NmClient {
         Ok(uuid)
     }
 
+    /// Delete a saved connection profile via `SettingsConnection::Delete`.
+    pub async fn delete_connection(&self, uuid: &str) -> Result<()> {
+        let settings = SettingsProxy::new(&self.conn).await?;
+        let path = settings.get_connection_by_uuid(uuid).await?;
+        let sc = SettingsConnectionProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        sc.delete().await?;
+        Ok(())
+    }
+
     /// Deactivate (disconnect) an active connection by UUID.
     pub async fn deactivate(&self, uuid: &str) -> Result<()> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;

@@ -113,6 +113,9 @@ pub trait SettingsConnection {
         HashMap<String, OwnedValue>,
         HashMap<String, OwnedValue>,
     )>;
+
+    /// Remove this connection profile from NetworkManager.
+    fn delete(&self) -> zbus::Result<()>;
 }
 
 // ── org.freedesktop.NetworkManager.Connection.Active ─────────────────────────

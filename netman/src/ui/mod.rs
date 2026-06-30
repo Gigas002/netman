@@ -9,6 +9,7 @@
 mod add_connection_menu;
 mod connection_editor;
 mod connection_list;
+mod delete_confirm_prompt;
 mod detail_panel;
 mod hidden_network_prompt;
 mod password_prompt;
@@ -102,6 +103,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(editor) = &app.connection_editor {
         connection_editor::render(frame, area, editor);
     }
+
+    if let Some(prompt) = &app.delete_confirm_prompt {
+        delete_confirm_prompt::render(frame, area, prompt);
+    }
 }
 
 // ── Key hints bar ─────────────────────────────────────────────────────────────
@@ -111,6 +116,7 @@ fn render_key_hints(frame: &mut Frame, area: Rect, app: &App) {
         ("↑↓/jk", "Navigate"),
         ("Enter", "Connect"),
         ("d", "Disconnect"),
+        ("D", "Delete"),
         ("e", "Edit"),
         ("a", "Add"),
         ("r", "Scan"),
@@ -174,6 +180,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::raw("  Enter       Connect to selected network"),
         Line::raw("  d / Del     Disconnect selected network"),
+        Line::raw("  D           Delete selected saved profile"),
         Line::raw("  e           Edit selected saved profile"),
         Line::raw("  a           Add new connection"),
         Line::raw("  r / F5      Scan for Wi-Fi networks"),
