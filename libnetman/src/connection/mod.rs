@@ -27,8 +27,10 @@ pub struct Connection {
     pub kind: ConnectionKind,
     /// Current lifecycle state.
     pub status: ConnectionStatus,
-    /// Network layer details; populated only for active connections.
+    /// IPv4 network layer details; populated only for active connections.
     pub ip4: Option<Ip4Config>,
+    /// IPv6 network layer details; populated only for active connections.
+    pub ip6: Option<Ip6Config>,
     /// Interface name of the attached device (e.g. `wlan0`, `eth0`).
     pub device: Option<String>,
     /// Whether this entry is a saved NM profile (`true`) or a visible-only AP (`false`).
@@ -230,6 +232,19 @@ pub struct Ip4Config {
     pub nameservers: Vec<String>,
 }
 
+// ── Ip6Config ─────────────────────────────────────────────────────────────────
+
+/// IPv6 network configuration for an active connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ip6Config {
+    /// Address in CIDR notation (e.g. `2001:db8::1/64`).
+    pub address: String,
+    /// Default gateway address.
+    pub gateway: Option<String>,
+    /// DNS server addresses.
+    pub nameservers: Vec<String>,
+}
+
 /// Merge live scan data into saved Wi-Fi connections and append visible-only APs.
 ///
 /// For each saved Wi-Fi profile whose SSID appears in `access_points`, live
@@ -276,6 +291,7 @@ pub fn merge_wifi_scan_data(connections: &mut Vec<Connection>, access_points: Ve
             kind: ConnectionKind::Wifi(ap),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
             saved: false,
         });

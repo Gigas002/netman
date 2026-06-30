@@ -14,6 +14,7 @@ fn wifi_connection(strength: u8, security: WifiSecurity, status: ConnectionStatu
         }),
         status,
         ip4: None,
+        ip6: None,
         device: Some("wlan0".into()),
         saved: true,
     }

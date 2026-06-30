@@ -23,6 +23,7 @@ fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
             ConnectionStatus::Inactive
         },
         ip4: None,
+        ip6: None,
         device: None,
         saved: true,
     }
@@ -35,6 +36,7 @@ fn ethernet(id: &str) -> Connection {
         kind: ConnectionKind::Ethernet,
         status: ConnectionStatus::Inactive,
         ip4: None,
+        ip6: None,
         device: None,
         saved: true,
     }

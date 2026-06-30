@@ -599,7 +599,7 @@ impl StateChangeWaiter {
 /// A single row in the connection list.
 pub enum ListItem {
     Header(String),
-    Connection(Connection),
+    Connection(Box<Connection>),
     HiddenWifiConnect,
 }
 
@@ -1929,19 +1929,23 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
     let mut items = Vec::new();
 
     items.push(ListItem::Header("Wi-Fi".into()));
-    items.extend(wifi.into_iter().map(ListItem::Connection));
+    items.extend(wifi.into_iter().map(|c| ListItem::Connection(Box::new(c))));
     items.push(ListItem::HiddenWifiConnect);
     if !ethernet.is_empty() {
         items.push(ListItem::Header("Ethernet".into()));
-        items.extend(ethernet.into_iter().map(ListItem::Connection));
+        items.extend(
+            ethernet
+                .into_iter()
+                .map(|c| ListItem::Connection(Box::new(c))),
+        );
     }
     if !vpn.is_empty() {
         items.push(ListItem::Header("VPN".into()));
-        items.extend(vpn.into_iter().map(ListItem::Connection));
+        items.extend(vpn.into_iter().map(|c| ListItem::Connection(Box::new(c))));
     }
     if !other.is_empty() {
         items.push(ListItem::Header("Other".into()));
-        items.extend(other.into_iter().map(ListItem::Connection));
+        items.extend(other.into_iter().map(|c| ListItem::Connection(Box::new(c))));
     }
 
     items
@@ -1949,7 +1953,7 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
 
 fn demo_connections() -> Vec<ListItem> {
     use libnetman::connection::{
-        ConnectionKind, Ip4Config, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
+        ConnectionKind, Ip4Config, Ip6Config, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
     };
 
     let demo: Vec<Connection> = vec![
@@ -1970,6 +1974,11 @@ fn demo_connections() -> Vec<ListItem> {
                 gateway: Some("192.168.1.1".into()),
                 nameservers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             }),
+            ip6: Some(Ip6Config {
+                address: "2001:db8::100/64".into(),
+                gateway: Some("fe80::1".into()),
+                nameservers: vec!["2001:4860:4860::8888".into()],
+            }),
             device: Some("wlan0".into()),
             saved: true,
         },
@@ -1986,6 +1995,7 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
             saved: true,
         },
@@ -2002,6 +2012,7 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
             saved: true,
         },
@@ -2018,6 +2029,7 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
             saved: false,
         },
@@ -2027,6 +2039,7 @@ fn demo_connections() -> Vec<ListItem> {
             kind: ConnectionKind::Ethernet,
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: Some("eth0".into()),
             saved: true,
         },
@@ -2038,6 +2051,7 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
             saved: true,
         },

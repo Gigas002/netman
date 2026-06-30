@@ -138,24 +138,24 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
 
     // IPv4 section
     if let Some(ip4) = &conn.ip4 {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  IPv4",
-            Style::default()
-                .fg(FG_ACCENT)
-                .add_modifier(Modifier::UNDERLINED),
-        )));
-        field(&mut lines, "Address", &ip4.address);
-        if let Some(gw) = &ip4.gateway {
-            field(&mut lines, "Gateway", gw);
-        }
-        for (i, ns) in ip4.nameservers.iter().enumerate() {
-            if i == 0 {
-                field(&mut lines, "DNS", ns);
-            } else {
-                field(&mut lines, "", ns);
-            }
-        }
+        append_ip_section(
+            &mut lines,
+            "IPv4",
+            ip4.address.as_str(),
+            &ip4.gateway,
+            &ip4.nameservers,
+        );
+    }
+
+    // IPv6 section
+    if let Some(ip6) = &conn.ip6 {
+        append_ip_section(
+            &mut lines,
+            "IPv6",
+            ip6.address.as_str(),
+            &ip6.gateway,
+            &ip6.nameservers,
+        );
     }
 
     lines.push(Line::raw(""));
@@ -165,6 +165,33 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
     )));
 
     lines
+}
+
+fn append_ip_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    address: &str,
+    gateway: &Option<String>,
+    nameservers: &[String],
+) {
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {title}"),
+        Style::default()
+            .fg(FG_ACCENT)
+            .add_modifier(Modifier::UNDERLINED),
+    )));
+    field(lines, "Address", address);
+    if let Some(gw) = gateway {
+        field(lines, "Gateway", gw);
+    }
+    for (i, ns) in nameservers.iter().enumerate() {
+        if i == 0 {
+            field(lines, "DNS", ns);
+        } else {
+            field(lines, "", ns);
+        }
+    }
 }
 
 fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {

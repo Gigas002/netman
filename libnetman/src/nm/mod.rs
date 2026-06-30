@@ -23,15 +23,15 @@ use crate::{
     Result,
     connection::{
         Connection as NmConn, ConnectionKind, ConnectionProfile, ConnectionStatus,
-        ConnectivityState, Ip4Config, NmState, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
-        merge_wifi_scan_data, wifi_strength,
+        ConnectivityState, Ip4Config, Ip6Config, NmState, VpnInfo, WifiInfo, WifiMode,
+        WifiSecurity, merge_wifi_scan_data, wifi_strength,
     },
     error::Error,
 };
 use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile, profile_to_settings};
 use proxies::{
     AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
-    NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
+    Ip6ConfigProxy, NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
 };
 
 /// NM device type constant for Wi-Fi adapters.
@@ -429,7 +429,8 @@ impl NmClient {
         let uuid = get_str_field(&raw, "connection", "uuid").unwrap_or_default();
         let conn_type = get_str_field(&raw, "connection", "type").unwrap_or_default();
 
-        let (status, device_name, ip4) = self.active_info_for_uuid(&uuid, active_proxies).await;
+        let (status, device_name, ip4, ip6) =
+            self.active_info_for_uuid(&uuid, active_proxies).await;
 
         let kind = self.build_kind(&conn_type, &raw).await;
 
@@ -439,6 +440,7 @@ impl NmClient {
             kind,
             status,
             ip4,
+            ip6,
             device: device_name,
             saved: true,
         })
@@ -448,7 +450,12 @@ impl NmClient {
         &self,
         uuid: &str,
         active_proxies: &[ActiveConnectionProxy<'_>],
-    ) -> (ConnectionStatus, Option<String>, Option<Ip4Config>) {
+    ) -> (
+        ConnectionStatus,
+        Option<String>,
+        Option<Ip4Config>,
+        Option<Ip6Config>,
+    ) {
         for proxy in active_proxies {
             let Ok(u) = proxy.uuid().await else { continue };
             if u != uuid {
@@ -464,10 +471,11 @@ impl NmClient {
 
             let device_name = self.first_device_name(proxy).await;
             let ip4 = self.ip4_config(proxy).await;
+            let ip6 = self.ip6_config(proxy).await;
 
-            return (status, device_name, ip4);
+            return (status, device_name, ip4, ip6);
         }
-        (ConnectionStatus::Inactive, None, None)
+        (ConnectionStatus::Inactive, None, None, None)
     }
 
     async fn first_device_name(&self, active: &ActiveConnectionProxy<'_>) -> Option<String> {
@@ -494,27 +502,22 @@ impl NmClient {
             .await
             .ok()?;
 
-        let addresses = cfg.address_data().await.ok()?;
-        let address = addresses.first().and_then(|a| {
-            let addr = get_str_value(a, "address")?;
-            let prefix = get_u32_value(a, "prefix").unwrap_or(24);
-            Some(format!("{addr}/{prefix}"))
-        })?;
+        parse_ip4_config(&cfg).await
+    }
 
-        let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
-        let nameservers = cfg
-            .nameserver_data()
+    async fn ip6_config(&self, active: &ActiveConnectionProxy<'_>) -> Option<Ip6Config> {
+        let path = active.ip6_config().await.ok()?;
+        if path.as_str() == "/" {
+            return None;
+        }
+        let cfg = Ip6ConfigProxy::builder(&self.conn)
+            .path(path.as_str())
+            .ok()?
+            .build()
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|ns| get_str_value(&ns, "address"))
-            .collect();
+            .ok()?;
 
-        Some(Ip4Config {
-            address,
-            gateway,
-            nameservers,
-        })
+        parse_ip6_config(&cfg).await
     }
 
     async fn build_kind(
@@ -673,6 +676,55 @@ fn get_str_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<String>
 fn get_u32_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
     let v = map.get(key)?;
     u32::try_from(v).ok()
+}
+
+async fn parse_ip4_config(cfg: &Ip4ConfigProxy<'_>) -> Option<Ip4Config> {
+    let addresses = cfg.address_data().await.ok()?;
+    let parsed = parse_live_ip_config(&addresses, 24)?;
+    let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
+    let nameservers = cfg
+        .nameserver_data()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|ns| get_str_value(&ns, "address"))
+        .collect();
+
+    Some(Ip4Config {
+        address: parsed,
+        gateway,
+        nameservers,
+    })
+}
+
+async fn parse_ip6_config(cfg: &Ip6ConfigProxy<'_>) -> Option<Ip6Config> {
+    let addresses = cfg.address_data().await.ok()?;
+    let parsed = parse_live_ip_config(&addresses, 64)?;
+    let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
+    let nameservers = cfg
+        .nameserver_data()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|ns| get_str_value(&ns, "address"))
+        .collect();
+
+    Some(Ip6Config {
+        address: parsed,
+        gateway,
+        nameservers,
+    })
+}
+
+fn parse_live_ip_config(
+    addresses: &[HashMap<String, OwnedValue>],
+    default_prefix: u32,
+) -> Option<String> {
+    addresses.first().and_then(|a| {
+        let addr = get_str_value(a, "address")?;
+        let prefix = get_u32_value(a, "prefix").unwrap_or(default_prefix);
+        Some(format!("{addr}/{prefix}"))
+    })
 }
 
 fn kind_order(kind: &ConnectionKind) -> u8 {

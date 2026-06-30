@@ -140,6 +140,10 @@ pub trait ActiveConnection {
     /// Object path of the IPv4 config (or "/" if none).
     #[zbus(property)]
     fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
+
+    /// Object path of the IPv6 config (or "/" if none).
+    #[zbus(property)]
+    fn ip6_config(&self) -> zbus::Result<OwnedObjectPath>;
 }
 
 // ── org.freedesktop.NetworkManager.Device ────────────────────────────────────
@@ -219,6 +223,26 @@ pub trait AccessPoint {
     default_service = "org.freedesktop.NetworkManager"
 )]
 pub trait Ip4Config {
+    /// List of address data maps (keys: `address`, `prefix`).
+    #[zbus(property)]
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+
+    /// Default gateway address string.
+    #[zbus(property)]
+    fn gateway(&self) -> zbus::Result<String>;
+
+    /// List of nameserver data maps (key: `address`).
+    #[zbus(property)]
+    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+}
+
+// ── org.freedesktop.NetworkManager.IP6Config ─────────────────────────────────
+
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.IP6Config",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+pub trait Ip6Config {
     /// List of address data maps (keys: `address`, `prefix`).
     #[zbus(property)]
     fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
