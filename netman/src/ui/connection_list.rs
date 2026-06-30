@@ -35,19 +35,29 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(idx, item)| match item {
-            AppListItem::Header(title) => ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {title} "),
-                    Style::default().fg(FG_HEADER).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "─".repeat(area.width.saturating_sub(title.len() as u16 + 4) as usize),
-                    Style::default().fg(FG_DIM),
-                ),
-            ])),
+            AppListItem::Header(title) => {
+                let disabled = title == "Wi-Fi" && !app.wireless_enabled;
+                let label = if disabled {
+                    format!(" {title} (disabled) ")
+                } else {
+                    format!(" {title} ")
+                };
+                let header_style = if disabled {
+                    Style::default().fg(FG_DIM).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(FG_HEADER).add_modifier(Modifier::BOLD)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(label.clone(), header_style),
+                    Span::styled(
+                        "─".repeat(area.width.saturating_sub(label.len() as u16) as usize),
+                        Style::default().fg(FG_DIM),
+                    ),
+                ]))
+            }
             AppListItem::Connection(conn) => {
                 let is_selected = Some(idx) == selected_item_idx;
-                build_connection_row(conn, is_selected)
+                build_connection_row(conn, is_selected, app)
             }
         })
         .collect();
@@ -60,8 +70,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" netman — NetworkManager ")
-                .border_style(Style::default().fg(FG_ACCENT)),
+                .title(list_title(app))
+                .border_style(Style::default().fg(if app.networking_enabled {
+                    FG_ACCENT
+                } else {
+                    FG_DIM
+                })),
         )
         .highlight_style(
             Style::default()
@@ -72,15 +86,37 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut list_state);
 }
 
+fn list_title(app: &App) -> String {
+    if app.networking_enabled {
+        " netman — NetworkManager ".into()
+    } else {
+        " netman — NetworkManager (networking off) ".into()
+    }
+}
+
+fn connection_disabled(app: &App, kind: &ConnectionKind) -> bool {
+    if !app.networking_enabled {
+        return true;
+    }
+    matches!(kind, ConnectionKind::Wifi(_)) && !app.wireless_enabled
+}
+
 fn build_connection_row<'a>(
     conn: &libnetman::connection::Connection,
     _selected: bool,
+    app: &App,
 ) -> ListItem<'a> {
-    let status_color = match conn.status {
-        ConnectionStatus::Active => FG_ACTIVE,
-        ConnectionStatus::Activating | ConnectionStatus::Deactivating => FG_WARN,
-        ConnectionStatus::Inactive => Color::Reset,
-        ConnectionStatus::Unknown => FG_DIM,
+    let disabled = connection_disabled(app, &conn.kind);
+
+    let status_color = if disabled {
+        FG_DIM
+    } else {
+        match conn.status {
+            ConnectionStatus::Active => FG_ACTIVE,
+            ConnectionStatus::Activating | ConnectionStatus::Deactivating => FG_WARN,
+            ConnectionStatus::Inactive => Color::Reset,
+            ConnectionStatus::Unknown => FG_DIM,
+        }
     };
 
     let indicator = Span::styled(
@@ -90,13 +126,16 @@ fn build_connection_row<'a>(
 
     match &conn.kind {
         ConnectionKind::Wifi(wifi) => {
+            let name_color = if disabled {
+                FG_DIM
+            } else if conn.is_active() {
+                FG_ACTIVE
+            } else {
+                Color::Reset
+            };
             let name = Span::styled(
                 format!("{:<24}", truncate(&wifi.ssid, 22)),
-                Style::default().fg(if conn.is_active() {
-                    FG_ACTIVE
-                } else {
-                    Color::Reset
-                }),
+                Style::default().fg(name_color),
             );
 
             let visible = if conn.saved {
@@ -105,10 +144,12 @@ fn build_connection_row<'a>(
                 Span::styled(" +", Style::default().fg(FG_WARN))
             };
 
-            let bar = Span::styled(
-                wifi.strength_bar(),
-                Style::default().fg(strength_color(wifi.strength)),
-            );
+            let bar_color = if disabled {
+                FG_DIM
+            } else {
+                strength_color(wifi.strength)
+            };
+            let bar = Span::styled(wifi.strength_bar(), Style::default().fg(bar_color));
 
             let strength_pct = Span::styled(
                 format!(" {:>3}%", wifi.strength),
@@ -138,25 +179,31 @@ fn build_connection_row<'a>(
         }
         ConnectionKind::Ethernet => {
             let device = conn.device.as_deref().unwrap_or("eth?");
+            let name_color = if disabled {
+                FG_DIM
+            } else if conn.is_active() {
+                FG_ACTIVE
+            } else {
+                Color::Reset
+            };
             let name = Span::styled(
                 format!("{:<24}", truncate(&conn.id, 22)),
-                Style::default().fg(if conn.is_active() {
-                    FG_ACTIVE
-                } else {
-                    Color::Reset
-                }),
+                Style::default().fg(name_color),
             );
             let dev_label = Span::styled(format!(" [{device}]"), Style::default().fg(FG_DIM));
             ListItem::new(Line::from(vec![indicator, name, dev_label]))
         }
         ConnectionKind::Vpn(_) => {
+            let name_color = if disabled {
+                FG_DIM
+            } else if conn.is_active() {
+                FG_ACTIVE
+            } else {
+                Color::Reset
+            };
             let name = Span::styled(
                 format!("{:<24}", truncate(&conn.id, 22)),
-                Style::default().fg(if conn.is_active() {
-                    FG_ACTIVE
-                } else {
-                    Color::Reset
-                }),
+                Style::default().fg(name_color),
             );
             let vpn_label = Span::styled(" VPN", Style::default().fg(FG_DIM));
             ListItem::new(Line::from(vec![indicator, name, vpn_label]))

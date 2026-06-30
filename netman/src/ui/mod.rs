@@ -79,6 +79,8 @@ fn render_key_hints(frame: &mut Frame, area: Rect, app: &App) {
         ("Enter", "Connect"),
         ("d", "Disconnect"),
         ("r", "Scan"),
+        ("n", "Net"),
+        ("w", "Wi-Fi"),
         ("Tab", "Detail"),
         ("?", "Help"),
         ("q", "Quit"),
@@ -138,6 +140,8 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::raw("  Enter       Connect to selected network"),
         Line::raw("  d / Del     Disconnect selected network"),
         Line::raw("  r / F5      Scan for Wi-Fi networks"),
+        Line::raw("  n           Toggle networking on/off"),
+        Line::raw("  w           Toggle Wi-Fi radio on/off"),
         Line::raw(""),
         Line::from(Span::styled(
             "  View",

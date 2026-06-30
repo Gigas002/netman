@@ -66,6 +66,32 @@ impl NmClient {
         Ok(ConnectivityState::from_u32(raw))
     }
 
+    /// Returns whether NM has networking enabled (all devices).
+    pub async fn networking_enabled(&self) -> Result<bool> {
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        nm.networking_enabled().await.map_err(Error::from)
+    }
+
+    /// Returns whether the Wi-Fi radio is enabled.
+    pub async fn wireless_enabled(&self) -> Result<bool> {
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        nm.wireless_enabled().await.map_err(Error::from)
+    }
+
+    /// Enable or disable networking for all devices.
+    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        nm.set_networking_enabled(enabled).await?;
+        Ok(())
+    }
+
+    /// Enable or disable the Wi-Fi radio.
+    pub async fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        nm.set_wireless_enabled(enabled).await?;
+        Ok(())
+    }
+
     /// Returns all connections known to NetworkManager (saved profiles + active).
     pub async fn connections(&self) -> Result<Vec<NmConn>> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;

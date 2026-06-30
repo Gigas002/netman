@@ -32,6 +32,20 @@ pub trait NetworkManager {
     #[zbus(property)]
     fn active_connections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 
+    /// Whether networking (all devices) is enabled.
+    #[zbus(property)]
+    fn networking_enabled(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_networking_enabled(&self, value: bool) -> zbus::Result<()>;
+
+    /// Whether Wi-Fi radio is enabled.
+    #[zbus(property)]
+    fn wireless_enabled(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_wireless_enabled(&self, value: bool) -> zbus::Result<()>;
+
     /// Activate a previously saved connection on a device.
     fn activate_connection(
         &self,

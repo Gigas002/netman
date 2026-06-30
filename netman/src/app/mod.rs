@@ -69,6 +69,8 @@ pub async fn run(settings: Settings) -> Result<()> {
                                     Action::Activate(uuid) => app.on_activate(&uuid).await,
                                     Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
                                     Action::Scan => app.on_scan().await,
+                                    Action::ToggleNetworking => app.on_toggle_networking().await,
+                                    Action::ToggleWireless => app.on_toggle_wireless().await,
                                 }
                             }
                             Ok(Event::Resize(_, _)) => {}
@@ -104,6 +106,10 @@ pub struct App {
     pub show_detail: bool,
     /// Overall NM daemon state.
     pub nm_state: NmState,
+    /// Whether NM networking (all devices) is enabled.
+    pub networking_enabled: bool,
+    /// Whether the Wi-Fi radio is enabled.
+    pub wireless_enabled: bool,
     /// Whether the app is operating without a live NM daemon.
     pub demo_mode: bool,
     /// Help overlay visible.
@@ -173,6 +179,8 @@ enum Action {
     Activate(String),
     Deactivate(String),
     Scan,
+    ToggleNetworking,
+    ToggleWireless,
 }
 
 impl App {
@@ -190,6 +198,8 @@ impl App {
                         selected: 0,
                         show_detail,
                         nm_state: NmState::Unknown,
+                        networking_enabled: true,
+                        wireless_enabled: true,
                         demo_mode: false,
                         show_help: false,
                         status_message: None,
@@ -211,6 +221,8 @@ impl App {
             selected: 0,
             show_detail,
             nm_state: NmState::ConnectedGlobal,
+            networking_enabled: true,
+            wireless_enabled: true,
             demo_mode: true,
             show_help: false,
             status_message: Some("Demo mode — NetworkManager not available".into()),
@@ -240,6 +252,8 @@ impl App {
         #[cfg(feature = "dbus")]
         if let Some(nm) = &self.nm {
             self.nm_state = nm.state().await?;
+            self.networking_enabled = nm.networking_enabled().await.unwrap_or(true);
+            self.wireless_enabled = nm.wireless_enabled().await.unwrap_or(true);
             let connections = nm.connections().await?;
             self.items = build_list_items(connections);
             // Keep selection in bounds after refresh.
@@ -267,9 +281,15 @@ impl App {
             KeyCode::Enter => return self.connect_selected(),
             KeyCode::Char('d') | KeyCode::Delete => return self.disconnect_selected(),
             KeyCode::Char('r') | KeyCode::F(5) => {
+                if !self.wireless_enabled {
+                    self.status_message = Some("Wi-Fi is disabled.".into());
+                    return Action::Continue;
+                }
                 self.status_message = Some("Scanning…".into());
                 return Action::Scan;
             }
+            KeyCode::Char('n') => return Action::ToggleNetworking,
+            KeyCode::Char('w') => return Action::ToggleWireless,
             _ => {}
         }
         Action::Continue
@@ -306,9 +326,21 @@ impl App {
             return Action::Continue;
         }
 
+        if !self.networking_enabled {
+            self.status_message = Some("Networking is disabled.".into());
+            return Action::Continue;
+        }
+
         let Some(conn) = self.selected_connection().cloned() else {
             return Action::Continue;
         };
+
+        if matches!(conn.kind, libnetman::connection::ConnectionKind::Wifi(_))
+            && !self.wireless_enabled
+        {
+            self.status_message = Some("Wi-Fi is disabled.".into());
+            return Action::Continue;
+        }
 
         if !conn.is_saved() {
             self.status_message = Some(format!(
@@ -375,6 +407,11 @@ impl App {
             return;
         }
 
+        if !self.wireless_enabled {
+            self.status_message = Some("Wi-Fi is disabled.".into());
+            return;
+        }
+
         #[cfg(feature = "dbus")]
         if let Some(nm) = &self.nm {
             match nm.request_wifi_scan().await {
@@ -383,6 +420,54 @@ impl App {
                     Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
                 },
                 Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+            }
+        }
+    }
+
+    async fn on_toggle_networking(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — toggle not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            let enabled = !self.networking_enabled;
+            match nm.set_networking_enabled(enabled).await {
+                Ok(()) => {
+                    self.networking_enabled = enabled;
+                    self.status_message = Some(if enabled {
+                        "Networking enabled.".into()
+                    } else {
+                        "Networking disabled.".into()
+                    });
+                    let _ = self.refresh().await;
+                }
+                Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
+            }
+        }
+    }
+
+    async fn on_toggle_wireless(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — toggle not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            let enabled = !self.wireless_enabled;
+            match nm.set_wireless_enabled(enabled).await {
+                Ok(()) => {
+                    self.wireless_enabled = enabled;
+                    self.status_message = Some(if enabled {
+                        "Wi-Fi enabled.".into()
+                    } else {
+                        "Wi-Fi disabled.".into()
+                    });
+                    let _ = self.refresh().await;
+                }
+                Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
             }
         }
     }
