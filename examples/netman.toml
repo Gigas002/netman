@@ -1,0 +1,33 @@
+# netman configuration file
+# Default location: ~/.config/netman/config.toml
+# Pass a custom path with: netman -c /path/to/config.toml
+#
+# All fields are optional — omit any section or key to use the built-in default.
+
+[log]
+# Minimum log level: "error", "warn", "info", "debug", "trace"
+# The -v / -vv flags override this at startup.
+# level = "warn"
+
+# Write logs to this file instead of stderr.
+# Strongly recommended when running the TUI so that log output does not
+# overwrite terminal rendering.
+# file = "/var/log/netman.log"
+
+[ui]
+# How often (milliseconds) the UI polls NetworkManager for state changes.
+# tick_rate = 1000
+
+# Show the connection detail panel on the right by default.
+# Toggle at runtime with Tab or p.
+# show_detail = true
+
+# (Informational — not yet used for layout calculations.)
+# list_height = 20
+
+[network]
+# Automatically send Wi-Fi scan requests to NetworkManager.
+# auto_scan = true
+
+# Seconds between automatic scan requests.
+# scan_interval = 30

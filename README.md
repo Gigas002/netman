@@ -1,33 +1,60 @@
-# rust-template
+# netman
 
-Template for rust projects. Configures:
+> TUI applet analogue of `network-manager-applet`.
 
-- typos checks via `.typos.toml`: run `typos .`
-- empty `LICENSE` file
-- basic `deny.toml`: run `cargo deny check licenses`
-- ready to use `CHANGELOG` file
-- minimalistic workspace-level `Cargo.toml`
-- basic `.gitignore` file
-- empty `examples/` directory for config/theme/etc examples
-- empty `docs/` directory for user and agent docs
-- weekly dependabot scans via `.github/dependabot.yml`
-- CI/CD jobs handled by GitHub Actions via `.github/workflows`
-    - three build jobs: minimal (`--no-default-features`), normal, full (`--all-features`) via `build.yml`
-    - deny check job via `deny.yml`
-    - automated deploy to GitHub releases and crates.io on new tag pushes
-    - automated crates.io `doc` build checks via `doc.yml`
-    - formatters checks: fmt, clippy-minimal (`--no-default-features`), clippy-normal, clippy-full (`--all-features`) via `lint.yml`
-    - typos check via `typos.yml`
-    - automated tests checks with `codecov` coverage reports:  via `test.yml`
+`netman` provides a keyboard-driven interface for managing Wi-Fi, Ethernet, and
+VPN connections through NetworkManager, using the same D-Bus API as the
+GNOME panel applet.
 
-## Requires manual changes
+## Features
 
-Look for `TODO` markers and replace with your data.
+- List all saved and in-range network connections grouped by type (Wi-Fi, Ethernet, VPN)
+- Real-time signal strength bars and connection status
+- Connect and disconnect with a single keypress
+- Detail panel: IP address, gateway, DNS, BSSID, band, security type
 
-- `test.yml`: specify projects for `codecov` job
-- `deploy.yml`: binary and library crates paths to build and publish
+## Workspace layout
 
-## Required environment variables
+```
+netman/       — binary crate (TUI binary)
+libnetman/    — library crate (domain types + D-Bus integration)
+examples/     — example TOML configs
+docs/         — architecture and user documentation
+```
 
-- `CARGO_REGISTRY_TOKEN` for `deploy` job to crates.io
-- `CODECOV_TOKEN` for code coverage reports on `test` job
+## Usage
+
+```
+netman [OPTIONS]
+
+Options:
+  -c, --config <FILE>   Config file [default: ~/.config/netman/config.toml]
+  -v, --verbose         Increase log level (-v = debug, -vv = trace)
+      --log-file <FILE> Write logs to file (recommended with TUI)
+      --tick-rate <MS>  UI refresh interval [default: 1000]
+  -h, --help            Print help
+  -V, --version         Print version
+```
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Move selection up |
+| `↓` / `j` | Move selection down |
+| `Enter` | Connect to selected network |
+| `d` / `Del` | Disconnect selected network |
+| `r` / `F5` | Refresh connection list |
+| `Tab` / `p` | Toggle detail panel |
+| `?` | Toggle help overlay |
+| `q` | Quit |
+| `Ctrl+C` | Force quit |
+
+## Configuration
+
+Place a TOML file at `~/.config/netman/config.toml` (or pass `-c FILE`).
+See [`examples/netman.toml`](examples/netman.toml) for all options.
+
+## License
+
+`netman` is free software licensed under the [GNU General Public License v3.0 only](LICENSE).

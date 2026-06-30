@@ -1,14 +1,32 @@
 [workspace]
-members = ["binary-crate", "crate"]
+members = ["libnetman", "netman"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
-homepage = ""
-description = ""
-keywords = []
-repository = ""
+license = "GPL-3.0-only"
+homepage = "https://github.com/netman-rs/netman"
+description = "TUI applet analogue of network-manager-applet"
+keywords = ["tui", "networkmanager", "networking", "linux", "dbus"]
+repository = "https://github.com/netman-rs/netman"
 version = "0.1.0"
 
 [workspace.dependencies]
+# Shared across library and binary
+thiserror = "2"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+
+# D-Bus / NetworkManager integration (optional, behind the `dbus` feature)
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Binary-only
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# TUI
+crossterm = "0.29"
+ratatui = "0.30"

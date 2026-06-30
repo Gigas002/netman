@@ -1,0 +1,20 @@
+[package]
+name = "libnetman"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+description = "Core types and NetworkManager D-Bus integration for netman"
+keywords.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enables live NetworkManager interaction via D-Bus (requires a running NM daemon).
+dbus = ["dep:zbus"]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+zbus = { workspace = true, optional = true }
