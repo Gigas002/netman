@@ -19,12 +19,30 @@ use crate::{
 
 /// Render the detail panel for the selected connection.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let lines = match app.selected_conn() {
-        Some(conn) => build_lines(conn),
-        None => vec![Line::styled(
+    let lines = if app.selected_hidden_wifi() {
+        vec![
+            Line::from(Span::styled(
+                "  Connect to hidden network",
+                Style::default().fg(FG_ACCENT).add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+            Line::styled(
+                "  Enter the SSID and password of a network that does not broadcast its name.",
+                Style::default().fg(FG_DIM),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "  Press Enter to open the connection dialog.",
+                Style::default().fg(FG_DIM),
+            ),
+        ]
+    } else if let Some(conn) = app.selected_conn() {
+        build_lines(conn)
+    } else {
+        vec![Line::styled(
             "  No connection selected",
             Style::default().fg(FG_DIM),
-        )],
+        )]
     };
 
     frame.render_widget(
@@ -67,6 +85,15 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
     // Type-specific info
     match &conn.kind {
         ConnectionKind::Wifi(wifi) => {
+            field(
+                &mut lines,
+                "Saved",
+                if conn.saved {
+                    "Yes"
+                } else {
+                    "No (visible only)"
+                },
+            );
             field(&mut lines, "Type", "Wi-Fi");
             field(&mut lines, "SSID", &wifi.ssid);
             field(&mut lines, "Security", wifi.security.label());
@@ -97,6 +124,28 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
                 .unwrap_or(&vpn.service_type);
             field(&mut lines, "Plugin", short_type);
         }
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(modem) => {
+            field(&mut lines, "Type", "Mobile");
+            if let Some(apn) = &modem.apn {
+                field(&mut lines, "APN", apn);
+            }
+            if let Some(name) = &modem.operator_name {
+                field(&mut lines, "Operator", name);
+            }
+            if let Some(code) = &modem.operator_code {
+                field(&mut lines, "MCC+MNC", code);
+            }
+            field(&mut lines, "Technology", modem.access_technology.label());
+            field(
+                &mut lines,
+                "Signal",
+                &format!("{}% {}", modem.signal_quality, modem.strength_bar()),
+            );
+            if modem.sim_locked {
+                field(&mut lines, "SIM", "PIN required");
+            }
+        }
         ConnectionKind::Loopback => {
             field(&mut lines, "Type", "Loopback");
         }
@@ -111,24 +160,24 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
 
     // IPv4 section
     if let Some(ip4) = &conn.ip4 {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  IPv4",
-            Style::default()
-                .fg(FG_ACCENT)
-                .add_modifier(Modifier::UNDERLINED),
-        )));
-        field(&mut lines, "Address", &ip4.address);
-        if let Some(gw) = &ip4.gateway {
-            field(&mut lines, "Gateway", gw);
-        }
-        for (i, ns) in ip4.nameservers.iter().enumerate() {
-            if i == 0 {
-                field(&mut lines, "DNS", ns);
-            } else {
-                field(&mut lines, "", ns);
-            }
-        }
+        append_ip_section(
+            &mut lines,
+            "IPv4",
+            ip4.address.as_str(),
+            &ip4.gateway,
+            &ip4.nameservers,
+        );
+    }
+
+    // IPv6 section
+    if let Some(ip6) = &conn.ip6 {
+        append_ip_section(
+            &mut lines,
+            "IPv6",
+            ip6.address.as_str(),
+            &ip6.gateway,
+            &ip6.nameservers,
+        );
     }
 
     lines.push(Line::raw(""));
@@ -138,6 +187,33 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
     )));
 
     lines
+}
+
+fn append_ip_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &str,
+    address: &str,
+    gateway: &Option<String>,
+    nameservers: &[String],
+) {
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {title}"),
+        Style::default()
+            .fg(FG_ACCENT)
+            .add_modifier(Modifier::UNDERLINED),
+    )));
+    field(lines, "Address", address);
+    if let Some(gw) = gateway {
+        field(lines, "Gateway", gw);
+    }
+    for (i, ns) in nameservers.iter().enumerate() {
+        if i == 0 {
+            field(lines, "DNS", ns);
+        } else {
+            field(lines, "", ns);
+        }
+    }
 }
 
 fn field(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {

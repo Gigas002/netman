@@ -12,12 +12,14 @@
 //!   points.
 //! - [`error`]: unified error type.
 //! - [`nm`] *(feature = `dbus`)*: live NetworkManager interaction via D-Bus.
+//! - Mobile broadband types and NM modem integration *(feature = `mobile`)*.
 //!
 //! Without the `dbus` feature the library compiles to pure types and helpers
 //! that can be used with a mock back-end or in tests.
 
 pub mod connection;
 pub mod error;
+pub mod vpn_plugins;
 
 #[cfg(feature = "dbus")]
 pub mod nm;

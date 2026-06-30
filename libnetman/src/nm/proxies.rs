@@ -32,6 +32,20 @@ pub trait NetworkManager {
     #[zbus(property)]
     fn active_connections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 
+    /// Whether networking (all devices) is enabled.
+    #[zbus(property)]
+    fn networking_enabled(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_networking_enabled(&self, value: bool) -> zbus::Result<()>;
+
+    /// Whether Wi-Fi radio is enabled.
+    #[zbus(property)]
+    fn wireless_enabled(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_wireless_enabled(&self, value: bool) -> zbus::Result<()>;
+
     /// Activate a previously saved connection on a device.
     fn activate_connection(
         &self,
@@ -42,6 +56,14 @@ pub trait NetworkManager {
 
     /// Deactivate an active connection.
     fn deactivate_connection(&self, active_connection: &str) -> zbus::Result<()>;
+
+    /// Add a new connection from settings and activate it immediately.
+    fn add_and_activate_connection(
+        &self,
+        connection: HashMap<String, HashMap<String, OwnedValue>>,
+        device: &str,
+        specific_object: &str,
+    ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
 // ── org.freedesktop.NetworkManager.Settings ───────────────────────────────────
@@ -57,6 +79,12 @@ pub trait Settings {
 
     /// Return the object path for the connection with the given UUID.
     fn get_connection_by_uuid(&self, uuid: &str) -> zbus::Result<OwnedObjectPath>;
+
+    /// Add a new connection profile from settings.
+    fn add_connection(
+        &self,
+        connection: HashMap<String, HashMap<String, OwnedValue>>,
+    ) -> zbus::Result<OwnedObjectPath>;
 }
 
 // ── org.freedesktop.NetworkManager.Settings.Connection ───────────────────────
@@ -68,6 +96,26 @@ pub trait Settings {
 pub trait SettingsConnection {
     /// Return all settings for this connection profile.
     fn get_settings(&self) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+
+    /// Return secrets for the given settings section (e.g. `802-11-wireless-security`).
+    fn get_secrets(
+        &self,
+        setting_name: &str,
+    ) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+
+    /// Update connection settings and persist to disk when `flags` includes `TO_DISK`.
+    fn update2(
+        &self,
+        settings: HashMap<String, HashMap<String, OwnedValue>>,
+        flags: u32,
+    ) -> zbus::Result<(
+        HashMap<String, HashMap<String, OwnedValue>>,
+        HashMap<String, OwnedValue>,
+        HashMap<String, OwnedValue>,
+    )>;
+
+    /// Remove this connection profile from NetworkManager.
+    fn delete(&self) -> zbus::Result<()>;
 }
 
 // ── org.freedesktop.NetworkManager.Connection.Active ─────────────────────────
@@ -92,6 +140,10 @@ pub trait ActiveConnection {
     /// Object path of the IPv4 config (or "/" if none).
     #[zbus(property)]
     fn ip4_config(&self) -> zbus::Result<OwnedObjectPath>;
+
+    /// Object path of the IPv6 config (or "/" if none).
+    #[zbus(property)]
+    fn ip6_config(&self) -> zbus::Result<OwnedObjectPath>;
 }
 
 // ── org.freedesktop.NetworkManager.Device ────────────────────────────────────
@@ -182,4 +234,103 @@ pub trait Ip4Config {
     /// List of nameserver data maps (key: `address`).
     #[zbus(property)]
     fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+}
+
+// ── org.freedesktop.NetworkManager.IP6Config ─────────────────────────────────
+
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.IP6Config",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+pub trait Ip6Config {
+    /// List of address data maps (keys: `address`, `prefix`).
+    #[zbus(property)]
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+
+    /// Default gateway address string.
+    #[zbus(property)]
+    fn gateway(&self) -> zbus::Result<String>;
+
+    /// List of nameserver data maps (key: `address`).
+    #[zbus(property)]
+    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+}
+
+// ── org.freedesktop.NetworkManager.Device.Modem ───────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.NetworkManager.Device.Modem",
+    default_service = "org.freedesktop.NetworkManager"
+)]
+pub trait DeviceModem {
+    /// Supported modem capabilities (NMDeviceModemCapabilities bitmask).
+    #[zbus(property)]
+    fn modem_capabilities(&self) -> zbus::Result<u32>;
+
+    /// Currently active modem capabilities.
+    #[zbus(property)]
+    fn current_capabilities(&self) -> zbus::Result<u32>;
+
+    /// ModemManager device ID (object path since NM 1.20).
+    #[zbus(property)]
+    fn device_id(&self) -> zbus::Result<String>;
+
+    /// MCC+MNC operator code when connected.
+    #[zbus(property)]
+    fn operator_code(&self) -> zbus::Result<String>;
+
+    /// Active APN when connected.
+    #[zbus(property)]
+    fn apn(&self) -> zbus::Result<String>;
+}
+
+// ── org.freedesktop.ModemManager1.Modem ───────────────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Modem",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmModem {
+    /// Signal quality (0–100) and whether the value is recent.
+    #[zbus(property)]
+    fn signal_quality(&self) -> zbus::Result<(u32, bool)>;
+
+    /// Unlock type required (MMModemLock enum as u32).
+    #[zbus(property)]
+    fn unlock_required(&self) -> zbus::Result<u32>;
+
+    /// SIM object path.
+    #[zbus(property)]
+    fn sim(&self) -> zbus::Result<OwnedObjectPath>;
+
+    /// Current access technologies bitmask.
+    #[zbus(property)]
+    fn access_technologies(&self) -> zbus::Result<u32>;
+}
+
+// ── org.freedesktop.ModemManager1.Modem.Modem3gpp ─────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Modem.Modem3gpp",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmModem3gpp {
+    /// Human-readable operator name.
+    #[zbus(property)]
+    fn operator_name(&self) -> zbus::Result<String>;
+}
+
+// ── org.freedesktop.ModemManager1.Sim ─────────────────────────────────────────
+
+#[cfg(feature = "mobile")]
+#[proxy(
+    interface = "org.freedesktop.ModemManager1.Sim",
+    default_service = "org.freedesktop.ModemManager1"
+)]
+pub trait MmSim {
+    /// Send the SIM PIN to unlock the card.
+    fn send_pin(&self, pin: &str) -> zbus::Result<()>;
 }

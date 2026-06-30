@@ -10,11 +10,18 @@ repository.workspace = true
 
 [features]
 default = []
-# Enables live NetworkManager interaction via D-Bus (requires a running NM daemon).
-dbus = ["dep:zbus"]
+dbus = ["dep:zbus", "dep:tokio", "dep:tokio-stream", "dep:uuid"]
+# Mobile broadband (GSM / LTE / 5G) via ModemManager.
+mobile = ["dbus"]
 
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 zbus = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

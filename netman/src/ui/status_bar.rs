@@ -87,5 +87,20 @@ fn build_status_line(app: &App) -> Line<'static> {
         }
     }
 
+    if !app.networking_enabled {
+        spans.push(Span::styled("  ─  ", Style::default().fg(FG_DIM)));
+        spans.push(Span::styled(
+            "Net: off",
+            Style::default().fg(FG_WARN).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.wireless_enabled {
+        spans.push(Span::styled("  ", Style::default()));
+        spans.push(Span::styled(
+            "Wi-Fi: off",
+            Style::default().fg(FG_WARN).add_modifier(Modifier::BOLD),
+        ));
+    }
+
     Line::from(spans)
 }

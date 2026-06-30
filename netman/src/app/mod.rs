@@ -7,13 +7,17 @@
 
 use std::time::Duration;
 
+use crate::ui::TextInput;
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use libnetman::connection::{Connection, ConnectionStatus, NmState};
+use libnetman::connection::{
+    Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile, Ipv4Profile,
+    Ipv6Profile, NmState, VpnProfile, WifiProfile, WifiSecurity,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::time;
@@ -50,6 +54,14 @@ pub async fn run(settings: Settings) -> Result<()> {
                     warn!(error = %e, "refresh failed");
                 }
             }
+            state_changed = app.state_watcher.wait() => {
+                if state_changed.is_some() {
+                    app.clear_inflight_status();
+                    if let Err(e) = app.refresh().await {
+                        warn!(error = %e, "refresh after state change failed");
+                    }
+                }
+            }
             ready = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(50))) => {
                 match ready {
                     Ok(Ok(true)) => {
@@ -58,8 +70,32 @@ pub async fn run(settings: Settings) -> Result<()> {
                                 match app.handle_key(key.code, key.modifiers) {
                                     Action::Quit => break Ok(()),
                                     Action::Continue => {}
+                                    Action::Activate(uuid) => app.on_activate(&uuid).await,
+                                    Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
+                                    Action::Scan => app.on_scan().await,
+                                    Action::ToggleNetworking => app.on_toggle_networking().await,
+                                    Action::ToggleWireless => app.on_toggle_wireless().await,
+                                    Action::ConnectUnsaved {
+                                        ssid,
+                                        security,
+                                        password,
+                                        hidden,
+                                    } => app.on_connect_unsaved(ssid, security, password, hidden).await,
+                                    Action::EditConnection(uuid) => app.on_edit_connection(uuid).await,
+                                    Action::SaveConnection => app.on_save_connection().await,
+                                    Action::ImportVpn {
+                                        plugin_name,
+                                        path,
+                                        activate,
+                                    } => app.on_import_vpn(plugin_name, path, activate).await,
+                                    Action::DeleteConnection(uuid) => {
+                                        app.on_delete_connection(uuid).await
+                                    }
+                                    #[cfg(feature = "mobile")]
+                                    Action::UnlockSim { pin } => app.on_unlock_sim(pin).await,
                                 }
                             }
+                            Ok(Event::Paste(text)) => app.handle_paste(&text),
                             Ok(Event::Resize(_, _)) => {}
                             Ok(_) => {}
                             Err(e) => break Err(anyhow::anyhow!("terminal event error: {e}")),
@@ -93,32 +129,599 @@ pub struct App {
     pub show_detail: bool,
     /// Overall NM daemon state.
     pub nm_state: NmState,
+    /// Whether NM networking (all devices) is enabled.
+    pub networking_enabled: bool,
+    /// Whether the Wi-Fi radio is enabled.
+    pub wireless_enabled: bool,
     /// Whether the app is operating without a live NM daemon.
     pub demo_mode: bool,
     /// Help overlay visible.
     pub show_help: bool,
-    /// Status message shown in the status bar (clears on next refresh).
+    /// Status message shown in the status bar (clears after NM state changes).
     pub status_message: Option<String>,
+    /// Wi-Fi password overlay for connecting to unsaved networks.
+    pub password_prompt: Option<PasswordPrompt>,
+    /// Hidden-network overlay (SSID + password).
+    pub hidden_network_prompt: Option<HiddenNetworkPrompt>,
+    /// Connection profile editor overlay.
+    pub connection_editor: Option<ConnectionEditor>,
+    /// Add-connection type picker.
+    pub add_connection_menu: Option<AddConnectionMenu>,
+    /// VPN-specific add sub-menu.
+    pub vpn_add_menu: Option<VpnAddMenu>,
+    /// VPN file import overlay.
+    pub vpn_import_prompt: Option<VpnImportPrompt>,
+    /// Delete saved profile confirmation overlay.
+    pub delete_confirm_prompt: Option<DeleteConfirmPrompt>,
+    /// SIM PIN unlock overlay for locked mobile broadband modems.
+    #[cfg(feature = "mobile")]
+    pub pin_unlock_prompt: Option<PinUnlockPrompt>,
     #[cfg(feature = "dbus")]
     nm: Option<libnetman::nm::NmClient>,
+    state_watcher: StateChangeWaiter,
+}
+
+/// State for the Wi-Fi password modal.
+pub struct PasswordPrompt {
+    pub ssid: String,
+    pub security: WifiSecurity,
+    pub input: TextInput,
+    pub show_password: bool,
+    pub error: Option<String>,
+}
+
+impl PasswordPrompt {
+    pub fn new(ssid: String, security: WifiSecurity) -> Self {
+        Self {
+            ssid,
+            security,
+            input: TextInput::new(),
+            show_password: false,
+            error: None,
+        }
+    }
+}
+
+/// State for the SIM PIN unlock modal.
+#[cfg(feature = "mobile")]
+pub struct PinUnlockPrompt {
+    pub label: String,
+    pub input: TextInput,
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "mobile")]
+impl PinUnlockPrompt {
+    pub fn new(label: String) -> Self {
+        Self {
+            label,
+            input: TextInput::new(),
+            error: None,
+        }
+    }
+}
+
+/// Active field in the hidden-network modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenPromptField {
+    Ssid,
+    Password,
+}
+
+/// State for the hidden Wi-Fi connection modal.
+pub struct HiddenNetworkPrompt {
+    pub ssid: TextInput,
+    pub password: TextInput,
+    pub focused: HiddenPromptField,
+    pub show_password: bool,
+    pub error: Option<String>,
+}
+
+impl Default for HiddenNetworkPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HiddenNetworkPrompt {
+    pub fn new() -> Self {
+        Self {
+            ssid: TextInput::new(),
+            password: TextInput::new(),
+            focused: HiddenPromptField::Ssid,
+            show_password: false,
+            error: None,
+        }
+    }
+
+    fn focused_input_mut(&mut self) -> &mut TextInput {
+        match self.focused {
+            HiddenPromptField::Ssid => &mut self.ssid,
+            HiddenPromptField::Password => &mut self.password,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.focused = match self.focused {
+            HiddenPromptField::Ssid => HiddenPromptField::Password,
+            HiddenPromptField::Password => HiddenPromptField::Ssid,
+        };
+    }
+}
+
+/// State for the delete-connection confirmation modal.
+pub struct DeleteConfirmPrompt {
+    pub uuid: String,
+    pub label: String,
+    pub error: Option<String>,
+}
+
+impl DeleteConfirmPrompt {
+    pub fn new(uuid: String, label: String) -> Self {
+        Self {
+            uuid,
+            label,
+            error: None,
+        }
+    }
+}
+
+/// Identifies one editable field in the connection editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorFieldId {
+    Ssid,
+    Security,
+    Password,
+    Hidden,
+    Autoconnect,
+    VpnSecondary,
+    IpMethod,
+    IpAddress,
+    Prefix,
+    Gateway,
+    Dns,
+    Ip6Method,
+    Ip6Address,
+    Ip6Prefix,
+    Ip6Gateway,
+    Ip6Dns,
+    Mtu,
+    ClonedMac,
+    VpnServiceType,
+    VpnGateway,
+    VpnUsername,
+    VpnPassword,
+    VpnPort,
+    VpnProtocol,
+    VpnGroup,
+    ConnectionName,
+    Activate,
+}
+
+/// Whether the editor is creating or updating a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMode {
+    Edit,
+    New,
+}
+
+/// Connection type offered in the add-connection menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewConnectionKind {
+    Wifi,
+    Ethernet,
+    Vpn,
+}
+
+impl NewConnectionKind {
+    pub fn all() -> &'static [Self] {
+        &[Self::Wifi, Self::Ethernet, Self::Vpn]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Wifi => "Wi-Fi",
+            Self::Ethernet => "Ethernet",
+            Self::Vpn => "VPN",
+        }
+    }
+}
+
+/// State for the add-connection type picker.
+pub struct AddConnectionMenu {
+    pub selected: usize,
+}
+
+impl Default for AddConnectionMenu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AddConnectionMenu {
+    pub fn new() -> Self {
+        Self { selected: 0 }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let count = NewConnectionKind::all().len();
+        if count == 0 {
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).rem_euclid(count as i32) as usize;
+    }
+
+    pub fn selected_kind(&self) -> NewConnectionKind {
+        NewConnectionKind::all()[self.selected]
+    }
+}
+
+/// VPN add sub-menu listing installed plugins plus import.
+pub struct VpnAddMenu {
+    pub plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>,
+    pub selected: usize,
+}
+
+impl VpnAddMenu {
+    pub fn item_count(&self) -> usize {
+        self.plugins.len() + 1
+    }
+
+    pub fn item_label(&self, idx: usize) -> String {
+        if let Some(plugin) = self.plugins.get(idx) {
+            format!("Configure {}…", plugin.label)
+        } else {
+            "[ Import from file… ]".into()
+        }
+    }
+
+    pub fn is_import(&self, idx: usize) -> bool {
+        idx >= self.plugins.len()
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+        self.selected = (self.selected as i32 + delta).rem_euclid(count as i32) as usize;
+    }
+}
+
+/// State for the VPN file import modal.
+pub struct VpnImportPrompt {
+    pub plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>,
+    pub selected_plugin: usize,
+    pub path: TextInput,
+    pub activate_on_save: bool,
+    pub error: Option<String>,
+}
+
+impl VpnImportPrompt {
+    pub fn new(plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>) -> Self {
+        Self {
+            plugins,
+            selected_plugin: 0,
+            path: TextInput::new(),
+            activate_on_save: true,
+            error: None,
+        }
+    }
+
+    fn cycle_plugin(&mut self, forward: bool) {
+        if self.plugins.is_empty() {
+            return;
+        }
+        let count = self.plugins.len();
+        if forward {
+            self.selected_plugin = (self.selected_plugin + 1) % count;
+        } else {
+            self.selected_plugin = (self.selected_plugin + count - 1) % count;
+        }
+    }
+}
+
+/// State for the connection profile editor modal.
+pub struct ConnectionEditor {
+    pub mode: EditorMode,
+    pub uuid: Option<String>,
+    pub title: String,
+    pub profile: ConnectionProfile,
+    pub fields: Vec<EditorFieldId>,
+    pub focused: usize,
+    pub inputs: std::collections::HashMap<EditorFieldId, TextInput>,
+    pub vpn_choices: Vec<(String, String)>,
+    pub show_secrets: bool,
+    pub activate_on_save: bool,
+    pub error: Option<String>,
+}
+
+impl ConnectionEditor {
+    pub fn edit(
+        uuid: String,
+        title: String,
+        profile: ConnectionProfile,
+        vpn_choices: Vec<(String, String)>,
+    ) -> Self {
+        let fields = editor_fields_for(&profile, false);
+        let mut inputs = std::collections::HashMap::new();
+        populate_inputs(&mut inputs, &profile);
+        Self {
+            mode: EditorMode::Edit,
+            uuid: Some(uuid),
+            title,
+            profile,
+            fields,
+            focused: 0,
+            inputs,
+            vpn_choices,
+            show_secrets: false,
+            activate_on_save: false,
+            error: None,
+        }
+    }
+
+    pub fn new_add(
+        title: String,
+        profile: ConnectionProfile,
+        vpn_choices: Vec<(String, String)>,
+    ) -> Self {
+        let fields = editor_fields_for(&profile, true);
+        let mut inputs = std::collections::HashMap::new();
+        populate_inputs(&mut inputs, &profile);
+        Self {
+            mode: EditorMode::New,
+            uuid: None,
+            title,
+            profile,
+            fields,
+            focused: 0,
+            inputs,
+            vpn_choices,
+            show_secrets: false,
+            activate_on_save: true,
+            error: None,
+        }
+    }
+
+    pub fn is_new(&self) -> bool {
+        self.mode == EditorMode::New
+    }
+
+    fn focused_field(&self) -> Option<EditorFieldId> {
+        self.fields.get(self.focused).copied()
+    }
+
+    fn next_field(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.sync_focused_text();
+        self.focused = (self.focused + 1) % self.fields.len();
+    }
+
+    fn prev_field(&mut self) {
+        if self.fields.is_empty() {
+            return;
+        }
+        self.sync_focused_text();
+        self.focused = (self.focused + self.fields.len() - 1) % self.fields.len();
+    }
+
+    fn sync_focused_text(&mut self) {
+        let Some(field) = self.focused_field() else {
+            return;
+        };
+        if !field.is_text() {
+            return;
+        }
+        let Some(input) = self.inputs.get(&field) else {
+            return;
+        };
+        let text = input.text().to_owned();
+        apply_text_field(&mut self.profile, field, &text);
+    }
+
+    fn sync_all_text(&mut self) {
+        for field in &self.fields {
+            if field.is_text()
+                && let Some(input) = self.inputs.get(field)
+            {
+                apply_text_field(&mut self.profile, *field, input.text());
+            }
+        }
+    }
+
+    fn cycle_choice(&mut self, forward: bool) {
+        let Some(field) = self.focused_field() else {
+            return;
+        };
+        match field {
+            EditorFieldId::Security => {
+                if let ConnectionProfile::Wifi(w) = &mut self.profile {
+                    w.security = if forward {
+                        w.security.next_editable()
+                    } else {
+                        w.security.prev_editable()
+                    };
+                }
+            }
+            EditorFieldId::IpMethod => {
+                if let Some(ipv4) = profile_ipv4_mut(&mut self.profile) {
+                    ipv4.method = if forward {
+                        ipv4.method.next()
+                    } else {
+                        ipv4.method.prev()
+                    };
+                }
+            }
+            EditorFieldId::Ip6Method => {
+                if let Some(ipv6) = profile_ipv6_mut(&mut self.profile) {
+                    ipv6.method = if forward {
+                        ipv6.method.next()
+                    } else {
+                        ipv6.method.prev()
+                    };
+                }
+            }
+            EditorFieldId::VpnSecondary => self.cycle_vpn_secondary(forward),
+            EditorFieldId::VpnProtocol => {
+                if let ConnectionProfile::Vpn(v) = &mut self.profile {
+                    v.protocol = if v.protocol.eq_ignore_ascii_case("tcp") {
+                        "udp".into()
+                    } else {
+                        "tcp".into()
+                    };
+                }
+            }
+            EditorFieldId::Hidden | EditorFieldId::Autoconnect => match &mut self.profile {
+                ConnectionProfile::Wifi(w) if matches!(field, EditorFieldId::Hidden) => {
+                    w.hidden = !w.hidden;
+                }
+                ConnectionProfile::Wifi(w) if matches!(field, EditorFieldId::Autoconnect) => {
+                    w.autoconnect = !w.autoconnect;
+                }
+                ConnectionProfile::Ethernet(e) => {
+                    e.autoconnect = !e.autoconnect;
+                }
+                _ => {}
+            },
+            EditorFieldId::Activate => {
+                self.activate_on_save = !self.activate_on_save;
+            }
+            _ => {}
+        }
+    }
+
+    fn cycle_vpn_secondary(&mut self, forward: bool) {
+        let choices_len = 1 + self.vpn_choices.len();
+        if choices_len <= 1 {
+            set_vpn_secondary(&mut self.profile, None);
+            return;
+        }
+
+        let current_idx = vpn_secondary_index(&self.profile, &self.vpn_choices);
+        let next_idx = if forward {
+            (current_idx + 1) % choices_len
+        } else {
+            (current_idx + choices_len - 1) % choices_len
+        };
+        let secondary = if next_idx == 0 {
+            None
+        } else {
+            Some(self.vpn_choices[next_idx - 1].0.clone())
+        };
+        set_vpn_secondary(&mut self.profile, secondary);
+    }
+
+    fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
+        let field = self.focused_field()?;
+        self.inputs.get_mut(&field)
+    }
+
+    pub fn display_value(&self, field: EditorFieldId) -> String {
+        match field {
+            EditorFieldId::Security => {
+                if let ConnectionProfile::Wifi(w) = &self.profile {
+                    w.security.label().to_owned()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::Hidden => {
+                if let ConnectionProfile::Wifi(w) = &self.profile {
+                    if w.hidden { "yes" } else { "no" }.to_owned()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::Autoconnect => link_autoconnect_label(&self.profile),
+            EditorFieldId::VpnSecondary => vpn_secondary_label(&self.profile, &self.vpn_choices),
+            EditorFieldId::IpMethod => profile_ipv4_ref(&self.profile)
+                .map(|ip| ip.method.label().to_owned())
+                .unwrap_or_default(),
+            EditorFieldId::Ip6Method => profile_ipv6_ref(&self.profile)
+                .map(|ip| ip.method.label().to_owned())
+                .unwrap_or_default(),
+            EditorFieldId::VpnProtocol => {
+                if let ConnectionProfile::Vpn(v) = &self.profile {
+                    v.protocol.to_ascii_uppercase()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::VpnServiceType => {
+                if let ConnectionProfile::Vpn(v) = &self.profile {
+                    v.service_type.clone()
+                } else {
+                    String::new()
+                }
+            }
+            EditorFieldId::Activate => {
+                if self.activate_on_save {
+                    "yes".into()
+                } else {
+                    "no".into()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+}
+
+/// Waits for NM active-connection state change signals when D-Bus is enabled.
+struct StateChangeWaiter {
+    #[cfg(feature = "dbus")]
+    rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+}
+
+impl StateChangeWaiter {
+    #[cfg(feature = "dbus")]
+    fn new(rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>) -> Self {
+        Self { rx }
+    }
+
+    #[cfg(not(feature = "dbus"))]
+    fn new() -> Self {
+        Self {}
+    }
+
+    async fn wait(&mut self) -> Option<()> {
+        #[cfg(feature = "dbus")]
+        {
+            match self.rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        {
+            std::future::pending().await
+        }
+    }
 }
 
 /// A single row in the connection list.
 pub enum ListItem {
     Header(String),
-    Connection(Connection),
+    Connection(Box<Connection>),
+    HiddenWifiConnect,
 }
 
 impl ListItem {
     pub fn as_connection(&self) -> Option<&Connection> {
         match self {
             Self::Connection(c) => Some(c),
-            Self::Header(_) => None,
+            Self::Header(_) | Self::HiddenWifiConnect => None,
         }
     }
 
     pub fn is_connection(&self) -> bool {
         matches!(self, Self::Connection(_))
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Connection(_) | Self::HiddenWifiConnect)
     }
 }
 
@@ -126,6 +729,29 @@ impl ListItem {
 enum Action {
     Quit,
     Continue,
+    Activate(String),
+    Deactivate(String),
+    Scan,
+    ToggleNetworking,
+    ToggleWireless,
+    ConnectUnsaved {
+        ssid: String,
+        security: WifiSecurity,
+        password: Option<String>,
+        hidden: bool,
+    },
+    EditConnection(String),
+    SaveConnection,
+    ImportVpn {
+        plugin_name: String,
+        path: String,
+        activate: bool,
+    },
+    DeleteConnection(String),
+    #[cfg(feature = "mobile")]
+    UnlockSim {
+        pin: String,
+    },
 }
 
 impl App {
@@ -136,15 +762,29 @@ impl App {
         {
             match libnetman::nm::NmClient::connect().await {
                 Ok(nm) => {
+                    let state_rx = nm.watch_active_state_changes().await.ok();
+                    let state_watcher = StateChangeWaiter::new(state_rx);
                     let mut app = Self {
                         items: Vec::new(),
                         selected: 0,
                         show_detail,
                         nm_state: NmState::Unknown,
+                        networking_enabled: true,
+                        wireless_enabled: true,
                         demo_mode: false,
                         show_help: false,
                         status_message: None,
+                        password_prompt: None,
+                        hidden_network_prompt: None,
+                        connection_editor: None,
+                        add_connection_menu: None,
+                        vpn_add_menu: None,
+                        vpn_import_prompt: None,
+                        delete_confirm_prompt: None,
+                        #[cfg(feature = "mobile")]
+                        pin_unlock_prompt: None,
                         nm: Some(nm),
+                        state_watcher,
                     };
                     let _ = app.refresh().await;
                     return app;
@@ -161,11 +801,32 @@ impl App {
             selected: 0,
             show_detail,
             nm_state: NmState::ConnectedGlobal,
+            networking_enabled: true,
+            wireless_enabled: true,
             demo_mode: true,
             show_help: false,
             status_message: Some("Demo mode — NetworkManager not available".into()),
+            password_prompt: None,
+            hidden_network_prompt: None,
+            connection_editor: None,
+            add_connection_menu: None,
+            vpn_add_menu: None,
+            vpn_import_prompt: None,
+            delete_confirm_prompt: None,
+            #[cfg(feature = "mobile")]
+            pin_unlock_prompt: None,
             #[cfg(feature = "dbus")]
             nm: None,
+            state_watcher: {
+                #[cfg(feature = "dbus")]
+                {
+                    StateChangeWaiter::new(None)
+                }
+                #[cfg(not(feature = "dbus"))]
+                {
+                    StateChangeWaiter::new()
+                }
+            },
         };
         app.items = demo_connections();
         app
@@ -180,20 +841,50 @@ impl App {
         #[cfg(feature = "dbus")]
         if let Some(nm) = &self.nm {
             self.nm_state = nm.state().await?;
+            self.networking_enabled = nm.networking_enabled().await.unwrap_or(true);
+            self.wireless_enabled = nm.wireless_enabled().await.unwrap_or(true);
             let connections = nm.connections().await?;
             self.items = build_list_items(connections);
             // Keep selection in bounds after refresh.
-            let conn_count = self.items.iter().filter(|i| i.is_connection()).count();
+            let conn_count = self.items.iter().filter(|i| i.is_selectable()).count();
             if conn_count > 0 {
                 self.selected = self.selected.min(conn_count - 1);
             }
             debug!(state = ?self.nm_state, items = self.items.len(), "refreshed");
+            #[cfg(feature = "mobile")]
+            self.maybe_show_pin_prompt();
         }
 
         Ok(())
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        if let Some(action) = self.handle_delete_confirm_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_connection_editor_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_vpn_import_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_vpn_add_menu_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_add_connection_menu_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_hidden_network_key(code, modifiers) {
+            return action;
+        }
+        if let Some(action) = self.handle_password_key(code, modifiers) {
+            return action;
+        }
+        #[cfg(feature = "mobile")]
+        if let Some(action) = self.handle_pin_unlock_key(code, modifiers) {
+            return action;
+        }
+
         match code {
             KeyCode::Char('q') | KeyCode::Char('Q') => return Action::Quit,
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -204,21 +895,387 @@ impl App {
             KeyCode::Tab | KeyCode::Char('p') => self.show_detail = !self.show_detail,
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Enter => self.connect_selected(),
-            KeyCode::Char('d') | KeyCode::Delete => self.disconnect_selected(),
+            KeyCode::Enter => return self.connect_selected(),
+            KeyCode::Char('d') => return self.disconnect_selected(),
+            KeyCode::Delete => return self.disconnect_selected(),
+            KeyCode::Char('D') => return self.delete_selected(),
             KeyCode::Char('r') | KeyCode::F(5) => {
-                self.status_message = Some("Refreshing…".into());
+                if !self.wireless_enabled {
+                    self.status_message = Some("Wi-Fi is disabled.".into());
+                    return Action::Continue;
+                }
+                self.status_message = Some("Scanning…".into());
+                return Action::Scan;
             }
+            KeyCode::Char('n') => return Action::ToggleNetworking,
+            KeyCode::Char('w') => return Action::ToggleWireless,
+            KeyCode::Char('e') => return self.edit_selected(),
+            KeyCode::Char('a') => return self.open_add_connection_menu(),
             _ => {}
         }
         Action::Continue
+    }
+
+    fn handle_delete_confirm_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let prompt = self.delete_confirm_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.delete_confirm_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let uuid = prompt.uuid.clone();
+                Some(Action::DeleteConnection(uuid))
+            }
+            _ => Some(Action::Continue),
+        }
+    }
+
+    fn handle_connection_editor_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let editor = self.connection_editor.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.connection_editor = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if code == KeyCode::Tab {
+                    editor.next_field();
+                } else {
+                    editor.prev_field();
+                }
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => Some(Action::SaveConnection),
+            KeyCode::Left => {
+                editor.cycle_choice(false);
+                Some(Action::Continue)
+            }
+            KeyCode::Right => {
+                editor.cycle_choice(true);
+                Some(Action::Continue)
+            }
+            KeyCode::Char(' ') => {
+                if matches!(
+                    editor.focused_field(),
+                    Some(EditorFieldId::Hidden)
+                        | Some(EditorFieldId::Activate)
+                        | Some(EditorFieldId::Autoconnect)
+                ) {
+                    editor.cycle_choice(true);
+                } else if let Some(input) = editor.focused_input_mut() {
+                    input.insert_str(" ");
+                    editor.error = None;
+                }
+                Some(Action::Continue)
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                editor.show_secrets = !editor.show_secrets;
+                Some(Action::Continue)
+            }
+            _ => {
+                if let Some(field) = editor.focused_field() {
+                    if field.is_read_only() || field.is_choice() || field.is_toggle() {
+                        return Some(Action::Continue);
+                    }
+                    if let Some(input) = editor.focused_input_mut()
+                        && input.handle_key(code, modifiers)
+                    {
+                        editor.error = None;
+                    }
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    fn handle_add_connection_menu_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let menu = self.add_connection_menu.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.add_connection_menu = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                menu.move_selection(-1);
+                Some(Action::Continue)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.move_selection(1);
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let kind = menu.selected_kind();
+                self.add_connection_menu = None;
+                if kind == NewConnectionKind::Vpn {
+                    self.open_vpn_add_menu();
+                } else {
+                    self.open_new_connection_editor(kind);
+                }
+                Some(Action::Continue)
+            }
+            _ => Some(Action::Continue),
+        }
+    }
+
+    fn handle_vpn_add_menu_key(
+        &mut self,
+        code: KeyCode,
+        _modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let menu = self.vpn_add_menu.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.vpn_add_menu = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                menu.move_selection(-1);
+                Some(Action::Continue)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                menu.move_selection(1);
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let selected = menu.selected;
+                let plugins = menu.plugins.clone();
+                if menu.is_import(selected) {
+                    self.vpn_add_menu = None;
+                    self.vpn_import_prompt = Some(VpnImportPrompt::new(plugins));
+                    Some(Action::Continue)
+                } else if let Some(plugin) = plugins.get(selected).cloned() {
+                    self.vpn_add_menu = None;
+                    self.open_vpn_manual_editor(&plugin);
+                    Some(Action::Continue)
+                } else {
+                    Some(Action::Continue)
+                }
+            }
+            _ => Some(Action::Continue),
+        }
+    }
+
+    fn handle_vpn_import_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.vpn_import_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.vpn_import_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Left => {
+                prompt.cycle_plugin(false);
+                Some(Action::Continue)
+            }
+            KeyCode::Right => {
+                prompt.cycle_plugin(true);
+                Some(Action::Continue)
+            }
+            KeyCode::Char(' ') => {
+                prompt.activate_on_save = !prompt.activate_on_save;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let path = prompt.path.text().trim().to_owned();
+                if path.is_empty() {
+                    prompt.error = Some("File path is required.".into());
+                    return Some(Action::Continue);
+                }
+                let Some(plugin) = prompt.plugins.get(prompt.selected_plugin) else {
+                    prompt.error = Some("No VPN plugin selected.".into());
+                    return Some(Action::Continue);
+                };
+                Some(Action::ImportVpn {
+                    plugin_name: plugin.name.clone(),
+                    path,
+                    activate: prompt.activate_on_save,
+                })
+            }
+            _ => {
+                if prompt.path.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    fn handle_hidden_network_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Option<Action> {
+        let prompt = self.hidden_network_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.hidden_network_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                prompt.next_field();
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                let ssid = prompt.ssid.text().trim().to_owned();
+                if ssid.is_empty() {
+                    prompt.error = Some("SSID is required.".into());
+                    prompt.focused = HiddenPromptField::Ssid;
+                    return Some(Action::Continue);
+                }
+                let password = prompt.password.text().to_owned();
+                let security = if password.is_empty() {
+                    WifiSecurity::None
+                } else {
+                    WifiSecurity::Wpa2
+                };
+                Some(Action::ConnectUnsaved {
+                    ssid,
+                    security,
+                    password: if password.is_empty() {
+                        None
+                    } else {
+                        Some(password)
+                    },
+                    hidden: true,
+                })
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                prompt.show_password = !prompt.show_password;
+                Some(Action::Continue)
+            }
+            _ => {
+                if prompt.focused_input_mut().handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    fn handle_password_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.password_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.password_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                if prompt.security.is_secured() && prompt.input.is_empty() {
+                    prompt.error = Some("Password is required.".into());
+                    return Some(Action::Continue);
+                }
+                let ssid = prompt.ssid.clone();
+                let security = prompt.security;
+                let password = if prompt.security.is_secured() {
+                    Some(prompt.input.text().to_owned())
+                } else {
+                    None
+                };
+                Some(Action::ConnectUnsaved {
+                    ssid,
+                    security,
+                    password,
+                    hidden: false,
+                })
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                prompt.show_password = !prompt.show_password;
+                Some(Action::Continue)
+            }
+            _ => {
+                if prompt.input.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    #[cfg(feature = "mobile")]
+    fn handle_pin_unlock_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+        let prompt = self.pin_unlock_prompt.as_mut()?;
+
+        match code {
+            KeyCode::Esc => {
+                self.pin_unlock_prompt = None;
+                Some(Action::Continue)
+            }
+            KeyCode::Enter => {
+                if prompt.input.is_empty() {
+                    prompt.error = Some("PIN is required.".into());
+                    return Some(Action::Continue);
+                }
+                let pin = prompt.input.text().to_owned();
+                Some(Action::UnlockSim { pin })
+            }
+            _ => {
+                if prompt.input.handle_key(code, modifiers) {
+                    prompt.error = None;
+                }
+                Some(Action::Continue)
+            }
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(prompt) = &mut self.vpn_import_prompt {
+            prompt.path.insert_str(text);
+            prompt.error = None;
+            return;
+        }
+        if let Some(editor) = &mut self.connection_editor {
+            if let Some(input) = editor.focused_input_mut() {
+                input.insert_str(text);
+                editor.error = None;
+            }
+            return;
+        }
+        if let Some(prompt) = &mut self.hidden_network_prompt {
+            prompt.focused_input_mut().insert_str(text);
+            prompt.error = None;
+            return;
+        }
+        if let Some(prompt) = &mut self.password_prompt {
+            prompt.input.insert_str(text);
+            prompt.error = None;
+        }
+        #[cfg(feature = "mobile")]
+        if let Some(prompt) = &mut self.pin_unlock_prompt {
+            prompt.input.insert_str(text);
+            prompt.error = None;
+        }
     }
 
     fn connection_indices(&self) -> Vec<usize> {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, i)| i.is_connection())
+            .filter(|(_, i)| i.is_selectable())
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -233,31 +1290,981 @@ impl App {
         self.selected = new;
     }
 
-    fn selected_connection(&self) -> Option<&Connection> {
+    fn selected_list_item(&self) -> Option<&ListItem> {
         let indices = self.connection_indices();
         let item_idx = *indices.get(self.selected)?;
-        self.items[item_idx].as_connection()
+        self.items.get(item_idx)
     }
 
-    fn connect_selected(&mut self) {
-        if let Some(conn) = self.selected_connection() {
-            if conn.is_active() {
-                self.status_message = Some(format!("'{}' is already connected.", conn.label()));
-            } else {
-                self.status_message = Some(format!("Connecting to '{}'…", conn.label()));
+    fn selected_connection(&self) -> Option<&Connection> {
+        self.selected_list_item()?.as_connection()
+    }
+
+    fn connect_selected(&mut self) -> Action {
+        if matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect)) {
+            if !self.demo_mode {
+                if !self.networking_enabled {
+                    self.status_message = Some("Networking is disabled.".into());
+                    return Action::Continue;
+                }
+                if !self.wireless_enabled {
+                    self.status_message = Some("Wi-Fi is disabled.".into());
+                    return Action::Continue;
+                }
+            }
+            self.hidden_network_prompt = Some(HiddenNetworkPrompt::new());
+            return Action::Continue;
+        }
+
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — connect not available".into());
+            return Action::Continue;
+        }
+
+        if !self.networking_enabled {
+            self.status_message = Some("Networking is disabled.".into());
+            return Action::Continue;
+        }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if matches!(conn.kind, libnetman::connection::ConnectionKind::Wifi(_))
+            && !self.wireless_enabled
+        {
+            self.status_message = Some("Wi-Fi is disabled.".into());
+            return Action::Continue;
+        }
+
+        if !conn.is_saved() {
+            let libnetman::connection::ConnectionKind::Wifi(wifi) = &conn.kind else {
+                return Action::Continue;
+            };
+            if matches!(wifi.security, WifiSecurity::Enterprise | WifiSecurity::Wep) {
+                self.status_message = Some(format!(
+                    "{} networks cannot be connected from here.",
+                    wifi.security.label()
+                ));
+                return Action::Continue;
+            }
+            if wifi.security.is_secured() {
+                self.password_prompt = Some(PasswordPrompt::new(wifi.ssid.clone(), wifi.security));
+                return Action::Continue;
+            }
+            return Action::ConnectUnsaved {
+                ssid: wifi.ssid.clone(),
+                security: wifi.security,
+                password: None,
+                hidden: false,
+            };
+        }
+
+        if conn.is_active() {
+            self.status_message = Some(format!("'{}' is already connected.", conn.label()));
+            return Action::Continue;
+        }
+
+        #[cfg(feature = "mobile")]
+        if let ConnectionKind::Modem(modem) = &conn.kind
+            && modem.sim_locked
+        {
+            self.pin_unlock_prompt = Some(PinUnlockPrompt::new(conn.label().to_owned()));
+            return Action::Continue;
+        }
+
+        self.status_message = Some("Activating…".into());
+        Action::Activate(conn.uuid)
+    }
+
+    fn disconnect_selected(&mut self) -> Action {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — disconnect not available".into());
+            return Action::Continue;
+        }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_saved() {
+            self.status_message = Some(format!("'{}' is a visible network only.", conn.label()));
+            return Action::Continue;
+        }
+
+        if !conn.is_active() {
+            self.status_message = Some(format!("'{}' is not active.", conn.label()));
+            return Action::Continue;
+        }
+
+        self.status_message = Some("Deactivating…".into());
+        Action::Deactivate(conn.uuid)
+    }
+
+    fn delete_selected(&mut self) -> Action {
+        if matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect)) {
+            return Action::Continue;
+        }
+
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_saved() {
+            self.status_message = Some("Only saved profiles can be deleted.".into());
+            return Action::Continue;
+        }
+
+        self.delete_confirm_prompt = Some(DeleteConfirmPrompt::new(
+            conn.uuid.clone(),
+            conn.label().to_owned(),
+        ));
+        Action::Continue
+    }
+
+    async fn on_delete_connection(&mut self, uuid: String) {
+        if self.demo_mode {
+            self.delete_confirm_prompt = None;
+            self.status_message = Some("Demo mode — delete not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.delete_connection(&uuid).await {
+                Ok(()) => {
+                    self.delete_confirm_prompt = None;
+                    self.status_message = Some("Connection deleted.".into());
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.delete_confirm_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    fn edit_selected(&mut self) -> Action {
+        let Some(conn) = self.selected_connection().cloned() else {
+            return Action::Continue;
+        };
+
+        if !conn.is_saved() {
+            self.status_message = Some("Only saved profiles can be edited.".into());
+            return Action::Continue;
+        }
+
+        if self.demo_mode {
+            let profile = demo_profile_from_connection(&conn);
+            if !profile.is_editable() {
+                self.status_message = Some("This connection type cannot be edited.".into());
+                return Action::Continue;
+            }
+            self.connection_editor = Some(ConnectionEditor::edit(
+                conn.uuid.clone(),
+                conn.label().to_owned(),
+                profile,
+                self.vpn_choices(),
+            ));
+            return Action::Continue;
+        }
+
+        Action::EditConnection(conn.uuid)
+    }
+
+    async fn on_edit_connection(&mut self, uuid: String) {
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.get_connection_profile(&uuid).await {
+                Ok(profile) => {
+                    if !profile.is_editable() {
+                        self.status_message = Some("This connection type cannot be edited.".into());
+                        return;
+                    }
+                    let title = self
+                        .selected_connection()
+                        .map(|c| c.label().to_owned())
+                        .unwrap_or_else(|| uuid.clone());
+                    self.connection_editor = Some(ConnectionEditor::edit(
+                        uuid,
+                        title,
+                        profile,
+                        self.vpn_choices(),
+                    ));
+                }
+                Err(e) => self.status_message = Some(format!("Load failed: {e}")),
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    async fn on_save_connection(&mut self) {
+        let Some(editor) = &mut self.connection_editor else {
+            return;
+        };
+        editor.sync_all_text();
+
+        if self.demo_mode {
+            self.connection_editor = None;
+            self.status_message = Some("Demo mode — save not available".into());
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let result = match editor.mode {
+                    EditorMode::Edit => {
+                        let uuid = editor.uuid.clone().expect("edit mode requires uuid");
+                        let profile = editor.profile.clone();
+                        nm.update_connection_profile(&uuid, &profile)
+                            .await
+                            .map(|()| uuid)
+                    }
+                    EditorMode::New => {
+                        let profile = editor.profile.clone();
+                        let activate = editor.activate_on_save;
+                        nm.add_connection_profile(&profile, activate).await
+                    }
+                };
+                match result {
+                    Ok(_) => {
+                        let activating = editor.mode == EditorMode::New && editor.activate_on_save;
+                        self.connection_editor = None;
+                        self.status_message = Some(if activating {
+                            "Connection saved. Activating…".into()
+                        } else {
+                            "Connection saved.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => {
+                        if let Some(ed) = &mut self.connection_editor {
+                            ed.error = Some(e.to_string());
+                        }
+                    }
+                }
             }
         }
     }
 
-    fn disconnect_selected(&mut self) {
-        if let Some(conn) = self.selected_connection() {
-            if conn.is_active() {
-                self.status_message = Some(format!("Disconnecting '{}'…", conn.label()));
-            } else {
-                self.status_message = Some(format!("'{}' is not active.", conn.label()));
+    fn open_vpn_add_menu(&mut self) {
+        let mut plugins = libnetman::vpn_plugins::list_installed_plugins();
+        if plugins.is_empty() {
+            plugins = demo_vpn_plugins();
+        }
+        if plugins.is_empty() {
+            self.status_message = Some("No VPN plugins installed.".into());
+            return;
+        }
+        self.vpn_add_menu = Some(VpnAddMenu {
+            plugins,
+            selected: 0,
+        });
+    }
+
+    fn open_vpn_manual_editor(&mut self, plugin: &libnetman::vpn_plugins::VpnPluginInfo) {
+        self.connection_editor = Some(ConnectionEditor::new_add(
+            plugin.label.clone(),
+            ConnectionProfile::Vpn(VpnProfile {
+                name: plugin.label.clone(),
+                service_type: plugin.service_type.clone(),
+                ..VpnProfile::default()
+            }),
+            self.vpn_choices(),
+        ));
+    }
+
+    async fn on_import_vpn(&mut self, plugin_name: String, path: String, activate: bool) {
+        if self.demo_mode {
+            self.vpn_import_prompt = None;
+            self.status_message = Some("Demo mode — import not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.import_vpn_from_file(&plugin_name, &path, activate).await {
+                Ok(_) => {
+                    self.vpn_import_prompt = None;
+                    self.status_message = Some(if activate {
+                        "VPN imported. Activating…".into()
+                    } else {
+                        "VPN imported.".into()
+                    });
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.vpn_import_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = (plugin_name, path, activate);
+    }
+
+    fn open_add_connection_menu(&mut self) -> Action {
+        if self.demo_mode {
+            self.add_connection_menu = Some(AddConnectionMenu::new());
+            return Action::Continue;
+        }
+        if !self.networking_enabled {
+            self.status_message = Some("Networking is disabled.".into());
+            return Action::Continue;
+        }
+        self.add_connection_menu = Some(AddConnectionMenu::new());
+        Action::Continue
+    }
+
+    fn open_new_connection_editor(&mut self, kind: NewConnectionKind) {
+        let profile = blank_profile_for(kind);
+        let title = kind.label().to_owned();
+        self.connection_editor = Some(ConnectionEditor::new_add(
+            title,
+            profile,
+            self.vpn_choices(),
+        ));
+    }
+
+    async fn on_activate(&mut self, uuid: &str) {
+        #[cfg(feature = "dbus")]
+        if let Err(e) = self.activate(uuid).await {
+            self.status_message = Some(format!("Activation failed: {e}"));
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    #[cfg(feature = "mobile")]
+    async fn on_unlock_sim(&mut self, pin: String) {
+        if self.demo_mode {
+            self.pin_unlock_prompt = None;
+            self.status_message = Some("Demo mode — SIM unlock not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.send_sim_pin(&pin).await {
+                Ok(()) => {
+                    self.pin_unlock_prompt = None;
+                    self.status_message = Some("SIM unlocked.".into());
+                    let _ = self.refresh().await;
+                }
+                Err(e) => {
+                    if let Some(prompt) = &mut self.pin_unlock_prompt {
+                        prompt.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = pin;
+    }
+
+    #[cfg(feature = "mobile")]
+    fn maybe_show_pin_prompt(&mut self) {
+        if self.pin_unlock_prompt.is_some() {
+            return;
+        }
+        for item in &self.items {
+            let ListItem::Connection(conn) = item else {
+                continue;
+            };
+            if let ConnectionKind::Modem(modem) = &conn.kind
+                && modem.sim_locked
+            {
+                self.pin_unlock_prompt = Some(PinUnlockPrompt::new(conn.label().to_owned()));
+                return;
             }
         }
     }
+
+    async fn on_deactivate(&mut self, uuid: &str) {
+        #[cfg(feature = "dbus")]
+        if let Err(e) = self.deactivate(uuid).await {
+            self.status_message = Some(format!("Deactivation failed: {e}"));
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = uuid;
+    }
+
+    async fn on_scan(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — scan not available".into());
+            return;
+        }
+
+        if !self.wireless_enabled {
+            self.status_message = Some("Wi-Fi is disabled.".into());
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                match nm.request_wifi_scan().await {
+                    Ok(()) => match self.refresh().await {
+                        Ok(()) => self.status_message = None,
+                        Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+                    },
+                    Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+                }
+            }
+        }
+    }
+
+    async fn on_toggle_networking(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — toggle not available".into());
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let enabled = !self.networking_enabled;
+                match nm.set_networking_enabled(enabled).await {
+                    Ok(()) => {
+                        self.networking_enabled = enabled;
+                        self.status_message = Some(if enabled {
+                            "Networking enabled.".into()
+                        } else {
+                            "Networking disabled.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
+                }
+            }
+        }
+    }
+
+    async fn on_toggle_wireless(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — toggle not available".into());
+        } else {
+            #[cfg(feature = "dbus")]
+            if let Some(nm) = &self.nm {
+                let enabled = !self.wireless_enabled;
+                match nm.set_wireless_enabled(enabled).await {
+                    Ok(()) => {
+                        self.wireless_enabled = enabled;
+                        self.status_message = Some(if enabled {
+                            "Wi-Fi enabled.".into()
+                        } else {
+                            "Wi-Fi disabled.".into()
+                        });
+                        let _ = self.refresh().await;
+                    }
+                    Err(e) => self.status_message = Some(format!("Toggle failed: {e}")),
+                }
+            }
+        }
+    }
+
+    async fn on_connect_unsaved(
+        &mut self,
+        ssid: String,
+        security: WifiSecurity,
+        password: Option<String>,
+        hidden: bool,
+    ) {
+        if self.demo_mode {
+            self.password_prompt = None;
+            self.hidden_network_prompt = None;
+            self.status_message = Some("Demo mode — connect not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm
+                .add_and_activate_wifi(&ssid, security, password.as_deref(), hidden)
+                .await
+            {
+                Ok(()) => {
+                    self.password_prompt = None;
+                    self.hidden_network_prompt = None;
+                    self.status_message = Some("Activating…".into());
+                }
+                Err(e) => {
+                    if hidden {
+                        if let Some(prompt) = &mut self.hidden_network_prompt {
+                            prompt.error = Some(e.to_string());
+                        }
+                    } else if password.is_some() {
+                        if let Some(prompt) = &mut self.password_prompt {
+                            prompt.error = Some(e.to_string());
+                        }
+                    } else {
+                        self.password_prompt = None;
+                        self.status_message = Some(format!("Connection failed: {e}"));
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "dbus"))]
+        let _ = (ssid, security, password, hidden);
+    }
+
+    #[cfg(feature = "dbus")]
+    async fn activate(&self, uuid: &str) -> libnetman::Result<()> {
+        let Some(nm) = &self.nm else {
+            return Ok(());
+        };
+        nm.activate(uuid).await
+    }
+
+    #[cfg(feature = "dbus")]
+    async fn deactivate(&self, uuid: &str) -> libnetman::Result<()> {
+        let Some(nm) = &self.nm else {
+            return Ok(());
+        };
+        nm.deactivate(uuid).await
+    }
+
+    fn clear_inflight_status(&mut self) {
+        if self
+            .status_message
+            .as_deref()
+            .is_some_and(is_inflight_status)
+        {
+            self.status_message = None;
+        }
+    }
+}
+
+/// Returns `true` for transient connect/disconnect status messages.
+fn is_inflight_status(message: &str) -> bool {
+    matches!(message, "Activating…" | "Deactivating…")
+}
+
+// ── Connection editor helpers ─────────────────────────────────────────────────
+
+impl EditorFieldId {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ssid => "SSID",
+            Self::Security => "Security",
+            Self::Password => "Password",
+            Self::Hidden => "Hidden network",
+            Self::Autoconnect => "Connect automatically",
+            Self::VpnSecondary => "Auto-connect VPN",
+            Self::IpMethod => "IPv4 method",
+            Self::IpAddress => "IPv4 address",
+            Self::Prefix => "IPv4 prefix",
+            Self::Gateway => "IPv4 gateway",
+            Self::Dns => "IPv4 DNS",
+            Self::Ip6Method => "IPv6 method",
+            Self::Ip6Address => "IPv6 address",
+            Self::Ip6Prefix => "IPv6 prefix",
+            Self::Ip6Gateway => "IPv6 gateway",
+            Self::Ip6Dns => "IPv6 DNS",
+            Self::Mtu => "MTU",
+            Self::ClonedMac => "Cloned MAC",
+            Self::VpnServiceType => "VPN service",
+            Self::VpnGateway => "Gateway",
+            Self::VpnUsername => "Username",
+            Self::VpnPassword => "Password",
+            Self::VpnPort => "Port",
+            Self::VpnProtocol => "Protocol",
+            Self::VpnGroup => "Group",
+            Self::ConnectionName => "Name",
+            Self::Activate => "Activate after save",
+        }
+    }
+
+    pub fn is_text(self) -> bool {
+        if self == Self::VpnServiceType {
+            return false;
+        }
+        matches!(
+            self,
+            Self::Ssid
+                | Self::Password
+                | Self::IpAddress
+                | Self::Prefix
+                | Self::Gateway
+                | Self::Dns
+                | Self::Ip6Address
+                | Self::Ip6Prefix
+                | Self::Ip6Gateway
+                | Self::Ip6Dns
+                | Self::Mtu
+                | Self::ClonedMac
+                | Self::ConnectionName
+                | Self::VpnGateway
+                | Self::VpnUsername
+                | Self::VpnPassword
+                | Self::VpnPort
+                | Self::VpnGroup
+        )
+    }
+
+    pub fn is_secret(self) -> bool {
+        matches!(self, Self::Password | Self::VpnPassword)
+    }
+
+    pub fn is_choice(self) -> bool {
+        matches!(
+            self,
+            Self::Security
+                | Self::IpMethod
+                | Self::Ip6Method
+                | Self::VpnSecondary
+                | Self::VpnProtocol
+        )
+    }
+
+    pub fn is_toggle(self) -> bool {
+        matches!(self, Self::Hidden | Self::Activate | Self::Autoconnect)
+    }
+
+    pub fn is_read_only(self) -> bool {
+        self == Self::VpnServiceType
+    }
+}
+
+fn ipv4_editor_fields() -> Vec<EditorFieldId> {
+    vec![
+        EditorFieldId::IpMethod,
+        EditorFieldId::IpAddress,
+        EditorFieldId::Prefix,
+        EditorFieldId::Gateway,
+        EditorFieldId::Dns,
+    ]
+}
+
+fn ipv6_editor_fields() -> Vec<EditorFieldId> {
+    vec![
+        EditorFieldId::Ip6Method,
+        EditorFieldId::Ip6Address,
+        EditorFieldId::Ip6Prefix,
+        EditorFieldId::Ip6Gateway,
+        EditorFieldId::Ip6Dns,
+    ]
+}
+
+fn link_editor_fields() -> Vec<EditorFieldId> {
+    vec![EditorFieldId::Autoconnect, EditorFieldId::VpnSecondary]
+}
+
+fn vpn_extra_editor_fields(service_type: &str) -> Vec<EditorFieldId> {
+    let mut fields = Vec::new();
+    if service_type.contains("openvpn") {
+        fields.push(EditorFieldId::VpnPort);
+        fields.push(EditorFieldId::VpnProtocol);
+    }
+    if service_type.contains("vpnc") {
+        fields.push(EditorFieldId::VpnGroup);
+    }
+    fields
+}
+
+pub(crate) fn editor_fields_for(profile: &ConnectionProfile, is_new: bool) -> Vec<EditorFieldId> {
+    let mut fields = match profile {
+        ConnectionProfile::Wifi(_) => {
+            let mut wifi_fields = vec![
+                EditorFieldId::Ssid,
+                EditorFieldId::Security,
+                EditorFieldId::Password,
+                EditorFieldId::Hidden,
+            ];
+            wifi_fields.extend(link_editor_fields());
+            wifi_fields.extend(ipv4_editor_fields());
+            wifi_fields.extend(ipv6_editor_fields());
+            wifi_fields
+        }
+        ConnectionProfile::Ethernet(_) => {
+            let mut eth_fields = vec![EditorFieldId::ConnectionName];
+            eth_fields.extend(link_editor_fields());
+            eth_fields.extend(ipv4_editor_fields());
+            eth_fields.extend(ipv6_editor_fields());
+            eth_fields.push(EditorFieldId::Mtu);
+            eth_fields.push(EditorFieldId::ClonedMac);
+            eth_fields
+        }
+        ConnectionProfile::Vpn(v) => {
+            let mut vpn_fields = vec![
+                EditorFieldId::ConnectionName,
+                EditorFieldId::VpnServiceType,
+                EditorFieldId::VpnGateway,
+                EditorFieldId::VpnUsername,
+                EditorFieldId::VpnPassword,
+            ];
+            vpn_fields.extend(vpn_extra_editor_fields(&v.service_type));
+            vpn_fields.extend(ipv4_editor_fields());
+            vpn_fields.extend(ipv6_editor_fields());
+            vpn_fields
+        }
+        ConnectionProfile::Unsupported { .. } => vec![],
+    };
+    if is_new {
+        fields.push(EditorFieldId::Activate);
+    }
+    fields
+}
+
+fn populate_ip_inputs<F>(set: &mut F, ipv4: &Ipv4Profile, ipv6: &Ipv6Profile)
+where
+    F: FnMut(EditorFieldId, &str),
+{
+    set(EditorFieldId::IpAddress, &ipv4.address);
+    set(EditorFieldId::Prefix, &ipv4.prefix.to_string());
+    set(EditorFieldId::Gateway, &ipv4.gateway);
+    set(EditorFieldId::Dns, &ipv4.dns);
+    set(EditorFieldId::Ip6Address, &ipv6.address);
+    set(EditorFieldId::Ip6Prefix, &ipv6.prefix.to_string());
+    set(EditorFieldId::Ip6Gateway, &ipv6.gateway);
+    set(EditorFieldId::Ip6Dns, &ipv6.dns);
+}
+
+fn populate_inputs(
+    inputs: &mut std::collections::HashMap<EditorFieldId, TextInput>,
+    profile: &ConnectionProfile,
+) {
+    let mut set = |field: EditorFieldId, value: &str| {
+        let mut input = TextInput::new();
+        input.insert_str(value);
+        inputs.insert(field, input);
+    };
+
+    match profile {
+        ConnectionProfile::Wifi(w) => {
+            set(EditorFieldId::Ssid, &w.ssid);
+            set(EditorFieldId::Password, &w.psk);
+            populate_ip_inputs(&mut set, &w.ipv4, &w.ipv6);
+        }
+        ConnectionProfile::Ethernet(e) => {
+            set(EditorFieldId::ConnectionName, &e.name);
+            populate_ip_inputs(&mut set, &e.ipv4, &e.ipv6);
+            set(EditorFieldId::Mtu, &e.mtu);
+            set(EditorFieldId::ClonedMac, &e.cloned_mac);
+        }
+        ConnectionProfile::Vpn(v) => {
+            set(EditorFieldId::ConnectionName, &v.name);
+            set(EditorFieldId::VpnGateway, &v.gateway);
+            set(EditorFieldId::VpnUsername, &v.username);
+            set(EditorFieldId::VpnPassword, &v.password);
+            set(EditorFieldId::VpnPort, &v.port);
+            set(EditorFieldId::VpnGroup, &v.group_name);
+            populate_ip_inputs(&mut set, &v.ipv4, &v.ipv6);
+        }
+        ConnectionProfile::Unsupported { .. } => {}
+    }
+}
+
+fn apply_text_field(profile: &mut ConnectionProfile, field: EditorFieldId, text: &str) {
+    match profile {
+        ConnectionProfile::Wifi(w) => match field {
+            EditorFieldId::Ssid => w.ssid = text.to_owned(),
+            EditorFieldId::Password => w.psk = text.to_owned(),
+            EditorFieldId::IpAddress => w.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => w.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => w.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => w.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => w.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => w.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => w.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => w.ipv6.dns = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Ethernet(e) => match field {
+            EditorFieldId::ConnectionName => e.name = text.to_owned(),
+            EditorFieldId::IpAddress => e.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => e.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => e.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => e.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => e.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => e.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => e.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => e.ipv6.dns = text.to_owned(),
+            EditorFieldId::Mtu => e.mtu = text.to_owned(),
+            EditorFieldId::ClonedMac => e.cloned_mac = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Vpn(v) => match field {
+            EditorFieldId::ConnectionName => v.name = text.to_owned(),
+            EditorFieldId::VpnGateway => v.gateway = text.to_owned(),
+            EditorFieldId::VpnUsername => v.username = text.to_owned(),
+            EditorFieldId::VpnPassword => v.password = text.to_owned(),
+            EditorFieldId::VpnPort => v.port = text.to_owned(),
+            EditorFieldId::VpnGroup => v.group_name = text.to_owned(),
+            EditorFieldId::IpAddress => v.ipv4.address = text.to_owned(),
+            EditorFieldId::Prefix => v.ipv4.prefix = text.parse().unwrap_or(24),
+            EditorFieldId::Gateway => v.ipv4.gateway = text.to_owned(),
+            EditorFieldId::Dns => v.ipv4.dns = text.to_owned(),
+            EditorFieldId::Ip6Address => v.ipv6.address = text.to_owned(),
+            EditorFieldId::Ip6Prefix => v.ipv6.prefix = text.parse().unwrap_or(64),
+            EditorFieldId::Ip6Gateway => v.ipv6.gateway = text.to_owned(),
+            EditorFieldId::Ip6Dns => v.ipv6.dns = text.to_owned(),
+            _ => {}
+        },
+        ConnectionProfile::Unsupported { .. } => {}
+    }
+}
+
+fn profile_ipv4_mut(profile: &mut ConnectionProfile) -> Option<&mut Ipv4Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&mut w.ipv4),
+        ConnectionProfile::Ethernet(e) => Some(&mut e.ipv4),
+        ConnectionProfile::Vpn(v) => Some(&mut v.ipv4),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn profile_ipv4_ref(profile: &ConnectionProfile) -> Option<&Ipv4Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&w.ipv4),
+        ConnectionProfile::Ethernet(e) => Some(&e.ipv4),
+        ConnectionProfile::Vpn(v) => Some(&v.ipv4),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn profile_ipv6_mut(profile: &mut ConnectionProfile) -> Option<&mut Ipv6Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&mut w.ipv6),
+        ConnectionProfile::Ethernet(e) => Some(&mut e.ipv6),
+        ConnectionProfile::Vpn(v) => Some(&mut v.ipv6),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn profile_ipv6_ref(profile: &ConnectionProfile) -> Option<&Ipv6Profile> {
+    match profile {
+        ConnectionProfile::Wifi(w) => Some(&w.ipv6),
+        ConnectionProfile::Ethernet(e) => Some(&e.ipv6),
+        ConnectionProfile::Vpn(v) => Some(&v.ipv6),
+        ConnectionProfile::Unsupported { .. } => None,
+    }
+}
+
+fn link_autoconnect_label(profile: &ConnectionProfile) -> String {
+    let enabled = match profile {
+        ConnectionProfile::Wifi(w) => w.autoconnect,
+        ConnectionProfile::Ethernet(e) => e.autoconnect,
+        _ => return String::new(),
+    };
+    if enabled { "yes" } else { "no" }.to_owned()
+}
+
+fn vpn_secondary_label(profile: &ConnectionProfile, choices: &[(String, String)]) -> String {
+    let uuid = match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary.as_deref(),
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary.as_deref(),
+        _ => return "(none)".into(),
+    };
+    let Some(uuid) = uuid else {
+        return "(none)".into();
+    };
+    choices
+        .iter()
+        .find(|(id, _)| id == uuid)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| uuid.to_owned())
+}
+
+fn vpn_secondary_index(profile: &ConnectionProfile, choices: &[(String, String)]) -> usize {
+    let uuid = match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary.as_deref(),
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary.as_deref(),
+        _ => return 0,
+    };
+    let Some(uuid) = uuid else {
+        return 0;
+    };
+    choices
+        .iter()
+        .position(|(id, _)| id == uuid)
+        .map(|idx| idx + 1)
+        .unwrap_or(0)
+}
+
+fn set_vpn_secondary(profile: &mut ConnectionProfile, secondary: Option<String>) {
+    match profile {
+        ConnectionProfile::Wifi(w) => w.vpn_secondary = secondary,
+        ConnectionProfile::Ethernet(e) => e.vpn_secondary = secondary,
+        _ => {}
+    }
+}
+
+fn demo_profile_from_connection(conn: &Connection) -> ConnectionProfile {
+    match &conn.kind {
+        ConnectionKind::Wifi(w) => ConnectionProfile::Wifi(WifiProfile {
+            ssid: w.ssid.clone(),
+            security: w.security,
+            psk: String::new(),
+            hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
+            ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
+        }),
+        ConnectionKind::Ethernet => ConnectionProfile::Ethernet(EthernetProfile {
+            name: conn.id.clone(),
+            autoconnect: true,
+            vpn_secondary: None,
+            ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
+            mtu: String::new(),
+            cloned_mac: String::new(),
+        }),
+        ConnectionKind::Vpn(v) => ConnectionProfile::Vpn(VpnProfile {
+            name: conn.id.clone(),
+            service_type: v.service_type.clone(),
+            ..VpnProfile::default()
+        }),
+        #[cfg(feature = "mobile")]
+        ConnectionKind::Modem(_) => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: "gsm".into(),
+        },
+        ConnectionKind::Loopback => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: "loopback".into(),
+        },
+        ConnectionKind::Other(t) => ConnectionProfile::Unsupported {
+            id: conn.id.clone(),
+            conn_type: t.clone(),
+        },
+    }
+}
+
+fn blank_profile_for(kind: NewConnectionKind) -> ConnectionProfile {
+    match kind {
+        NewConnectionKind::Wifi => ConnectionProfile::Wifi(WifiProfile {
+            ssid: String::new(),
+            security: WifiSecurity::Wpa2,
+            psk: String::new(),
+            hidden: false,
+            autoconnect: true,
+            vpn_secondary: None,
+            ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
+        }),
+        NewConnectionKind::Ethernet => ConnectionProfile::Ethernet(EthernetProfile {
+            name: "Wired connection".into(),
+            autoconnect: true,
+            vpn_secondary: None,
+            ipv4: Ipv4Profile::default(),
+            ipv6: Ipv6Profile::default(),
+            mtu: String::new(),
+            cloned_mac: String::new(),
+        }),
+        NewConnectionKind::Vpn => ConnectionProfile::Vpn(VpnProfile {
+            name: "VPN".into(),
+            service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+            ..VpnProfile::default()
+        }),
+    }
+}
+
+fn demo_vpn_plugins() -> Vec<libnetman::vpn_plugins::VpnPluginInfo> {
+    vec![libnetman::vpn_plugins::VpnPluginInfo {
+        name: "openvpn".into(),
+        service_type: "org.freedesktop.NetworkManager.openvpn".into(),
+        label: "OpenVPN".into(),
+    }]
 }
 
 // ── List building helpers ─────────────────────────────────────────────────────
@@ -266,34 +2273,71 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
     let mut wifi: Vec<Connection> = Vec::new();
     let mut ethernet: Vec<Connection> = Vec::new();
     let mut vpn: Vec<Connection> = Vec::new();
+    #[cfg(feature = "mobile")]
+    let mut mobile: Vec<Connection> = Vec::new();
     let mut other: Vec<Connection> = Vec::new();
 
     for c in connections {
         match &c.kind {
-            libnetman::connection::ConnectionKind::Wifi(_) => wifi.push(c),
-            libnetman::connection::ConnectionKind::Ethernet => ethernet.push(c),
-            libnetman::connection::ConnectionKind::Vpn(_) => vpn.push(c),
+            ConnectionKind::Wifi(_) => wifi.push(c),
+            ConnectionKind::Ethernet => ethernet.push(c),
+            ConnectionKind::Vpn(_) => vpn.push(c),
+            #[cfg(feature = "mobile")]
+            ConnectionKind::Modem(_) => mobile.push(c),
             _ => other.push(c),
         }
     }
 
+    wifi.sort_by(|a, b| {
+        b.is_active()
+            .cmp(&a.is_active())
+            .then_with(|| {
+                libnetman::connection::wifi_strength(b)
+                    .cmp(&libnetman::connection::wifi_strength(a))
+            })
+            .then_with(|| a.label().cmp(b.label()))
+    });
+
+    #[cfg(feature = "mobile")]
+    mobile.sort_by(|a, b| {
+        b.is_active()
+            .cmp(&a.is_active())
+            .then_with(|| {
+                libnetman::connection::modem_strength(b)
+                    .cmp(&libnetman::connection::modem_strength(a))
+            })
+            .then_with(|| a.label().cmp(b.label()))
+    });
+
     let mut items = Vec::new();
 
-    if !wifi.is_empty() {
-        items.push(ListItem::Header("Wi-Fi".into()));
-        items.extend(wifi.into_iter().map(ListItem::Connection));
-    }
+    items.push(ListItem::Header("Wi-Fi".into()));
+    items.extend(wifi.into_iter().map(|c| ListItem::Connection(Box::new(c))));
+    items.push(ListItem::HiddenWifiConnect);
     if !ethernet.is_empty() {
         items.push(ListItem::Header("Ethernet".into()));
-        items.extend(ethernet.into_iter().map(ListItem::Connection));
+        items.extend(
+            ethernet
+                .into_iter()
+                .map(|c| ListItem::Connection(Box::new(c))),
+        );
     }
     if !vpn.is_empty() {
         items.push(ListItem::Header("VPN".into()));
-        items.extend(vpn.into_iter().map(ListItem::Connection));
+        items.extend(vpn.into_iter().map(|c| ListItem::Connection(Box::new(c))));
+    }
+    #[cfg(feature = "mobile")]
+    if !mobile.is_empty() {
+        items.push(ListItem::Header("Mobile".into()));
+        items.extend(
+            mobile
+                .into_iter()
+                .map(|c| ListItem::Connection(Box::new(c))),
+        );
     }
     if !other.is_empty() {
         items.push(ListItem::Header("Other".into()));
-        items.extend(other.into_iter().map(ListItem::Connection));
+        items.extend(other.into_iter().map(|c| ListItem::Connection(Box::new(c))));
     }
 
     items
@@ -301,7 +2345,7 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
 
 fn demo_connections() -> Vec<ListItem> {
     use libnetman::connection::{
-        ConnectionKind, Ip4Config, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
+        ConnectionKind, Ip4Config, Ip6Config, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
     };
 
     let demo: Vec<Connection> = vec![
@@ -322,7 +2366,13 @@ fn demo_connections() -> Vec<ListItem> {
                 gateway: Some("192.168.1.1".into()),
                 nameservers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             }),
+            ip6: Some(Ip6Config {
+                address: "2001:db8::100/64".into(),
+                gateway: Some("fe80::1".into()),
+                nameservers: vec!["2001:4860:4860::8888".into()],
+            }),
             device: Some("wlan0".into()),
+            saved: true,
         },
         Connection {
             id: "Neighbour WiFi".into(),
@@ -337,7 +2387,9 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
+            saved: true,
         },
         Connection {
             id: "CoffeeShop".into(),
@@ -352,7 +2404,26 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
+            saved: true,
+        },
+        Connection {
+            id: "GuestWiFi".into(),
+            uuid: "visible:GuestWiFi".into(),
+            kind: ConnectionKind::Wifi(WifiInfo {
+                ssid: "GuestWiFi".into(),
+                strength: 38,
+                security: WifiSecurity::Wpa2,
+                frequency: Some(2462),
+                bssid: Some("99:88:77:66:55:44".into()),
+                mode: WifiMode::Infrastructure,
+            }),
+            status: ConnectionStatus::Inactive,
+            ip4: None,
+            ip6: None,
+            device: None,
+            saved: false,
         },
         Connection {
             id: "Wired Connection 1".into(),
@@ -360,7 +2431,9 @@ fn demo_connections() -> Vec<ListItem> {
             kind: ConnectionKind::Ethernet,
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: Some("eth0".into()),
+            saved: true,
         },
         Connection {
             id: "Work VPN".into(),
@@ -370,7 +2443,27 @@ fn demo_connections() -> Vec<ListItem> {
             }),
             status: ConnectionStatus::Inactive,
             ip4: None,
+            ip6: None,
             device: None,
+            saved: true,
+        },
+        #[cfg(feature = "mobile")]
+        Connection {
+            id: "Mobile Broadband".into(),
+            uuid: "44444444-0000-0000-0000-000000000001".into(),
+            kind: ConnectionKind::Modem(libnetman::connection::ModemInfo {
+                apn: Some("internet".into()),
+                operator_name: Some("Demo Mobile".into()),
+                operator_code: Some("00101".into()),
+                signal_quality: 78,
+                access_technology: libnetman::connection::AccessTechnology::Lte,
+                sim_locked: false,
+            }),
+            status: ConnectionStatus::Inactive,
+            ip4: None,
+            ip6: None,
+            device: Some("wwan0".into()),
+            saved: true,
         },
     ];
 
@@ -381,6 +2474,19 @@ fn demo_connections() -> Vec<ListItem> {
 impl App {
     pub fn selected_conn(&self) -> Option<&Connection> {
         self.selected_connection()
+    }
+
+    pub fn selected_hidden_wifi(&self) -> bool {
+        matches!(self.selected_list_item(), Some(ListItem::HiddenWifiConnect))
+    }
+
+    fn vpn_choices(&self) -> Vec<(String, String)> {
+        self.items
+            .iter()
+            .filter_map(|item| item.as_connection())
+            .filter(|conn| conn.saved && matches!(conn.kind, ConnectionKind::Vpn(_)))
+            .map(|conn| (conn.uuid.clone(), conn.id.clone()))
+            .collect()
     }
 }
 

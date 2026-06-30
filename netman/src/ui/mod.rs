@@ -6,12 +6,24 @@
 //! entry point called from the event loop: it lays out the frame and delegates
 //! to each element's render function.
 
+mod add_connection_menu;
+mod connection_editor;
 mod connection_list;
+mod delete_confirm_prompt;
 mod detail_panel;
+mod hidden_network_prompt;
+mod password_prompt;
+#[cfg(feature = "mobile")]
+mod pin_prompt;
 mod status_bar;
+mod text_input;
+mod vpn_add_menu;
+mod vpn_import_prompt;
 
 #[cfg(test)]
 mod tests;
+
+pub use text_input::TextInput;
 
 use ratatui::{
     Frame,
@@ -69,6 +81,39 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.show_help {
         render_help_overlay(frame, area);
     }
+
+    if let Some(prompt) = &app.password_prompt {
+        password_prompt::render(frame, area, prompt);
+    }
+
+    #[cfg(feature = "mobile")]
+    if let Some(prompt) = &app.pin_unlock_prompt {
+        pin_prompt::render(frame, area, prompt);
+    }
+
+    if let Some(prompt) = &app.hidden_network_prompt {
+        hidden_network_prompt::render(frame, area, prompt);
+    }
+
+    if let Some(menu) = &app.add_connection_menu {
+        add_connection_menu::render(frame, area, menu);
+    }
+
+    if let Some(menu) = &app.vpn_add_menu {
+        vpn_add_menu::render(frame, area, menu);
+    }
+
+    if let Some(prompt) = &app.vpn_import_prompt {
+        vpn_import_prompt::render(frame, area, prompt);
+    }
+
+    if let Some(editor) = &app.connection_editor {
+        connection_editor::render(frame, area, editor);
+    }
+
+    if let Some(prompt) = &app.delete_confirm_prompt {
+        delete_confirm_prompt::render(frame, area, prompt);
+    }
 }
 
 // ── Key hints bar ─────────────────────────────────────────────────────────────
@@ -78,7 +123,12 @@ fn render_key_hints(frame: &mut Frame, area: Rect, app: &App) {
         ("↑↓/jk", "Navigate"),
         ("Enter", "Connect"),
         ("d", "Disconnect"),
-        ("r", "Refresh"),
+        ("D", "Delete"),
+        ("e", "Edit"),
+        ("a", "Add"),
+        ("r", "Scan"),
+        ("n", "Net"),
+        ("w", "Wi-Fi"),
         ("Tab", "Detail"),
         ("?", "Help"),
         ("q", "Quit"),
@@ -137,7 +187,12 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         )),
         Line::raw("  Enter       Connect to selected network"),
         Line::raw("  d / Del     Disconnect selected network"),
-        Line::raw("  r / F5      Refresh connection list"),
+        Line::raw("  D           Delete selected saved profile"),
+        Line::raw("  e           Edit selected saved profile"),
+        Line::raw("  a           Add new connection"),
+        Line::raw("  r / F5      Scan for Wi-Fi networks"),
+        Line::raw("  n           Toggle networking on/off"),
+        Line::raw("  w           Toggle Wi-Fi radio on/off"),
         Line::raw(""),
         Line::from(Span::styled(
             "  View",
