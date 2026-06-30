@@ -25,12 +25,19 @@ pub struct Connection {
     pub ip4: Option<Ip4Config>,
     /// Interface name of the attached device (e.g. `wlan0`, `eth0`).
     pub device: Option<String>,
+    /// Whether this entry is a saved NM profile (`true`) or a visible-only AP (`false`).
+    pub saved: bool,
 }
 
 impl Connection {
     /// Returns `true` if the connection is currently active.
     pub fn is_active(&self) -> bool {
         matches!(self.status, ConnectionStatus::Active)
+    }
+
+    /// Returns `true` if this entry is a saved connection profile.
+    pub fn is_saved(&self) -> bool {
+        self.saved
     }
 
     /// Returns a short label suitable for UI list display.
@@ -198,6 +205,66 @@ pub struct Ip4Config {
     pub gateway: Option<String>,
     /// DNS server addresses.
     pub nameservers: Vec<String>,
+}
+
+/// Merge live scan data into saved Wi-Fi connections and append visible-only APs.
+///
+/// For each saved Wi-Fi profile whose SSID appears in `access_points`, live
+/// signal / frequency / BSSID / security data replaces the stale profile values.
+/// Access points with no matching saved profile are appended as unsaved entries.
+pub fn merge_wifi_scan_data(connections: &mut Vec<Connection>, access_points: Vec<WifiInfo>) {
+    use std::collections::{HashMap, HashSet};
+
+    // Keep the strongest AP per SSID.
+    let mut best_by_ssid: HashMap<String, WifiInfo> = HashMap::new();
+    for ap in access_points {
+        best_by_ssid
+            .entry(ap.ssid.clone())
+            .and_modify(|existing| {
+                if ap.strength > existing.strength {
+                    *existing = ap.clone();
+                }
+            })
+            .or_insert(ap);
+    }
+
+    let mut saved_ssids = HashSet::new();
+
+    for conn in connections.iter_mut() {
+        let ConnectionKind::Wifi(wifi) = &mut conn.kind else {
+            continue;
+        };
+        saved_ssids.insert(wifi.ssid.clone());
+        if let Some(live) = best_by_ssid.get(&wifi.ssid) {
+            wifi.strength = live.strength;
+            wifi.frequency = live.frequency;
+            wifi.bssid = live.bssid.clone();
+            wifi.security = live.security;
+        }
+    }
+
+    for (ssid, ap) in best_by_ssid {
+        if saved_ssids.contains(&ssid) {
+            continue;
+        }
+        connections.push(Connection {
+            id: ssid.clone(),
+            uuid: format!("visible:{ssid}"),
+            kind: ConnectionKind::Wifi(ap),
+            status: ConnectionStatus::Inactive,
+            ip4: None,
+            device: None,
+            saved: false,
+        });
+    }
+}
+
+/// Returns Wi-Fi signal strength for sorting, or 0 for non-Wi-Fi entries.
+pub fn wifi_strength(conn: &Connection) -> u8 {
+    match &conn.kind {
+        ConnectionKind::Wifi(w) => w.strength,
+        _ => 0,
+    }
 }
 
 // ── NmState ───────────────────────────────────────────────────────────────────

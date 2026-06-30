@@ -68,6 +68,7 @@ pub async fn run(settings: Settings) -> Result<()> {
                                     Action::Continue => {}
                                     Action::Activate(uuid) => app.on_activate(&uuid).await,
                                     Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
+                                    Action::Scan => app.on_scan().await,
                                 }
                             }
                             Ok(Event::Resize(_, _)) => {}
@@ -171,6 +172,7 @@ enum Action {
     Continue,
     Activate(String),
     Deactivate(String),
+    Scan,
 }
 
 impl App {
@@ -265,7 +267,8 @@ impl App {
             KeyCode::Enter => return self.connect_selected(),
             KeyCode::Char('d') | KeyCode::Delete => return self.disconnect_selected(),
             KeyCode::Char('r') | KeyCode::F(5) => {
-                self.status_message = Some("Refreshing…".into());
+                self.status_message = Some("Scanning…".into());
+                return Action::Scan;
             }
             _ => {}
         }
@@ -307,6 +310,14 @@ impl App {
             return Action::Continue;
         };
 
+        if !conn.is_saved() {
+            self.status_message = Some(format!(
+                "'{}' is visible only — password prompt coming in a future release.",
+                conn.label()
+            ));
+            return Action::Continue;
+        }
+
         if conn.is_active() {
             self.status_message = Some(format!("'{}' is already connected.", conn.label()));
             return Action::Continue;
@@ -325,6 +336,11 @@ impl App {
         let Some(conn) = self.selected_connection().cloned() else {
             return Action::Continue;
         };
+
+        if !conn.is_saved() {
+            self.status_message = Some(format!("'{}' is a visible network only.", conn.label()));
+            return Action::Continue;
+        }
 
         if !conn.is_active() {
             self.status_message = Some(format!("'{}' is not active.", conn.label()));
@@ -351,6 +367,24 @@ impl App {
         }
         #[cfg(not(feature = "dbus"))]
         let _ = uuid;
+    }
+
+    async fn on_scan(&mut self) {
+        if self.demo_mode {
+            self.status_message = Some("Demo mode — scan not available".into());
+            return;
+        }
+
+        #[cfg(feature = "dbus")]
+        if let Some(nm) = &self.nm {
+            match nm.request_wifi_scan().await {
+                Ok(()) => match self.refresh().await {
+                    Ok(()) => self.status_message = None,
+                    Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+                },
+                Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
+            }
+        }
     }
 
     #[cfg(feature = "dbus")]
@@ -402,6 +436,16 @@ fn build_list_items(connections: Vec<Connection>) -> Vec<ListItem> {
         }
     }
 
+    wifi.sort_by(|a, b| {
+        b.is_active()
+            .cmp(&a.is_active())
+            .then_with(|| {
+                libnetman::connection::wifi_strength(b)
+                    .cmp(&libnetman::connection::wifi_strength(a))
+            })
+            .then_with(|| a.label().cmp(b.label()))
+    });
+
     let mut items = Vec::new();
 
     if !wifi.is_empty() {
@@ -448,6 +492,7 @@ fn demo_connections() -> Vec<ListItem> {
                 nameservers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             }),
             device: Some("wlan0".into()),
+            saved: true,
         },
         Connection {
             id: "Neighbour WiFi".into(),
@@ -463,6 +508,7 @@ fn demo_connections() -> Vec<ListItem> {
             status: ConnectionStatus::Inactive,
             ip4: None,
             device: None,
+            saved: true,
         },
         Connection {
             id: "CoffeeShop".into(),
@@ -478,6 +524,23 @@ fn demo_connections() -> Vec<ListItem> {
             status: ConnectionStatus::Inactive,
             ip4: None,
             device: None,
+            saved: true,
+        },
+        Connection {
+            id: "GuestWiFi".into(),
+            uuid: "visible:GuestWiFi".into(),
+            kind: ConnectionKind::Wifi(WifiInfo {
+                ssid: "GuestWiFi".into(),
+                strength: 38,
+                security: WifiSecurity::Wpa2,
+                frequency: Some(2462),
+                bssid: Some("99:88:77:66:55:44".into()),
+                mode: WifiMode::Infrastructure,
+            }),
+            status: ConnectionStatus::Inactive,
+            ip4: None,
+            device: None,
+            saved: false,
         },
         Connection {
             id: "Wired Connection 1".into(),
@@ -486,6 +549,7 @@ fn demo_connections() -> Vec<ListItem> {
             status: ConnectionStatus::Inactive,
             ip4: None,
             device: Some("eth0".into()),
+            saved: true,
         },
         Connection {
             id: "Work VPN".into(),
@@ -496,6 +560,7 @@ fn demo_connections() -> Vec<ListItem> {
             status: ConnectionStatus::Inactive,
             ip4: None,
             device: None,
+            saved: true,
         },
     ];
 

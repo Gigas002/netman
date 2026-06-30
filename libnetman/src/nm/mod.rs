@@ -9,6 +9,7 @@
 mod proxies;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tracing::{debug, instrument, warn};
 use zbus::Connection;
@@ -18,14 +19,17 @@ use crate::{
     Result,
     connection::{
         Connection as NmConn, ConnectionKind, ConnectionStatus, ConnectivityState, Ip4Config,
-        NmState, VpnInfo, WifiInfo, WifiMode, WifiSecurity,
+        NmState, VpnInfo, WifiInfo, WifiMode, WifiSecurity, merge_wifi_scan_data, wifi_strength,
     },
     error::Error,
 };
 use proxies::{
-    ActiveConnectionProxy, DeviceProxy, Ip4ConfigProxy, NetworkManagerProxy,
-    SettingsConnectionProxy, SettingsProxy,
+    AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
+    NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
 };
+
+/// NM device type constant for Wi-Fi adapters.
+const DEVICE_TYPE_WIFI: u32 = 2;
 
 /// High-level client for the NetworkManager D-Bus service.
 pub struct NmClient {
@@ -91,14 +95,33 @@ impl NmClient {
             }
         }
 
+        if let Ok(access_points) = self.access_points().await {
+            merge_wifi_scan_data(&mut results, access_points);
+        }
+
         results.sort_by(|a, b| {
             b.is_active()
                 .cmp(&a.is_active())
                 .then_with(|| kind_order(&a.kind).cmp(&kind_order(&b.kind)))
+                .then_with(|| wifi_strength(b).cmp(&wifi_strength(a)))
                 .then_with(|| a.label().cmp(b.label()))
         });
 
         Ok(results)
+    }
+
+    /// Request a Wi-Fi scan on the first wireless device and wait briefly for results.
+    pub async fn request_wifi_scan(&self) -> Result<()> {
+        let path = self.find_wireless_path().await?;
+        let wireless = DeviceWirelessProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        wireless.request_scan(HashMap::new()).await?;
+        // NM completes the scan asynchronously; allow time before reading APs.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        Ok(())
     }
 
     /// Activate (connect) a saved connection profile.
@@ -193,6 +216,7 @@ impl NmClient {
             status,
             ip4,
             device: device_name,
+            saved: true,
         })
     }
 
@@ -340,6 +364,68 @@ impl NmClient {
             _ => WifiSecurity::None,
         }
     }
+
+    async fn find_wireless_path(&self) -> Result<zbus::zvariant::OwnedObjectPath> {
+        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        for path in nm.devices().await? {
+            let dev = DeviceProxy::builder(&self.conn)
+                .path(path.as_str())
+                .map_err(|e| Error::DBus(e.to_string()))?
+                .build()
+                .await?;
+            if dev.device_type().await? == DEVICE_TYPE_WIFI {
+                return Ok(path);
+            }
+        }
+        Err(Error::DeviceNotFound("wireless".into()))
+    }
+
+    async fn access_points(&self) -> Result<Vec<WifiInfo>> {
+        let path = self.find_wireless_path().await?;
+        let wireless = DeviceWirelessProxy::builder(&self.conn)
+            .path(path.as_str())
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+        let paths = wireless.get_all_access_points().await?;
+        let mut results = Vec::new();
+
+        for path in paths {
+            match self.build_access_point(path.as_str()).await {
+                Ok(ap) => results.push(ap),
+                Err(e) => warn!(?path, error = %e, "skipping access point"),
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn build_access_point(&self, path: &str) -> Result<WifiInfo> {
+        let ap = AccessPointProxy::builder(&self.conn)
+            .path(path)
+            .map_err(|e| Error::DBus(e.to_string()))?
+            .build()
+            .await?;
+
+        let ssid_bytes = ap.ssid().await?;
+        let ssid = String::from_utf8(ssid_bytes).unwrap_or_default();
+        if ssid.is_empty() {
+            return Err(Error::AccessPointNotFound(path.to_owned()));
+        }
+
+        let flags = ap.flags().await.unwrap_or(0);
+        let wpa_flags = ap.wpa_flags().await.unwrap_or(0);
+        let rsn_flags = ap.rsn_flags().await.unwrap_or(0);
+
+        Ok(WifiInfo {
+            ssid,
+            strength: ap.strength().await.unwrap_or(0),
+            security: security_from_ap(flags, wpa_flags, rsn_flags),
+            frequency: Some(ap.frequency().await.unwrap_or(0)),
+            bssid: Some(ap.hw_address().await.unwrap_or_default()),
+            mode: WifiMode::Infrastructure,
+        })
+    }
 }
 
 // ── zvariant value extraction helpers ────────────────────────────────────────
@@ -373,6 +459,34 @@ fn kind_order(kind: &ConnectionKind) -> u8 {
         ConnectionKind::Loopback => 3,
         ConnectionKind::Other(_) => 4,
     }
+}
+
+/// Derive Wi-Fi security from NM access-point flag bitmasks.
+pub(crate) fn security_from_ap(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
+    const AP_FLAG_PRIVACY: u32 = 0x1;
+    const AP_SEC_PAIR_WPA: u32 = 0x1;
+    const AP_SEC_PAIR_RSN: u32 = 0x2;
+    const AP_SEC_KEY_MGMT_PSK: u32 = 0x100;
+    const AP_SEC_KEY_MGMT_802_1X: u32 = 0x200;
+    const AP_SEC_KEY_MGMT_SAE: u32 = 0x400;
+
+    let sec = wpa_flags | rsn_flags;
+    if sec & AP_SEC_KEY_MGMT_SAE != 0 {
+        return WifiSecurity::Wpa3;
+    }
+    if sec & AP_SEC_KEY_MGMT_802_1X != 0 {
+        return WifiSecurity::Enterprise;
+    }
+    if sec & (AP_SEC_KEY_MGMT_PSK | AP_SEC_PAIR_RSN | AP_SEC_PAIR_WPA) != 0 {
+        return WifiSecurity::Wpa2;
+    }
+    if wpa_flags != 0 {
+        return WifiSecurity::Wpa;
+    }
+    if flags & AP_FLAG_PRIVACY != 0 {
+        return WifiSecurity::Wep;
+    }
+    WifiSecurity::None
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ fn wifi_connection(strength: u8, security: WifiSecurity, status: ConnectionStatu
         status,
         ip4: None,
         device: Some("wlan0".into()),
+        saved: true,
     }
 }
 
@@ -147,5 +148,48 @@ fn connection_kind_type_label() {
         })
         .type_label(),
         "VPN"
+    );
+}
+
+#[test]
+fn merge_wifi_scan_data_updates_saved_and_adds_visible() {
+    let mut connections = vec![wifi_connection(
+        0,
+        WifiSecurity::Wpa2,
+        ConnectionStatus::Inactive,
+    )];
+
+    merge_wifi_scan_data(
+        &mut connections,
+        vec![
+            WifiInfo {
+                ssid: "TestNet".into(),
+                strength: 72,
+                security: WifiSecurity::Wpa3,
+                frequency: Some(2437),
+                bssid: Some("aa:bb:cc:dd:ee:01".into()),
+                mode: WifiMode::Infrastructure,
+            },
+            WifiInfo {
+                ssid: "OpenCafe".into(),
+                strength: 55,
+                security: WifiSecurity::None,
+                frequency: Some(5240),
+                bssid: None,
+                mode: WifiMode::Infrastructure,
+            },
+        ],
+    );
+
+    let wifi = &connections[0];
+    let ConnectionKind::Wifi(info) = &wifi.kind else {
+        panic!("expected wifi");
+    };
+    assert_eq!(info.strength, 72);
+    assert_eq!(info.security, WifiSecurity::Wpa3);
+    assert!(
+        connections
+            .iter()
+            .any(|c| !c.saved && c.label() == "OpenCafe")
     );
 }

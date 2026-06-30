@@ -99,6 +99,12 @@ fn build_connection_row<'a>(
                 }),
             );
 
+            let visible = if conn.saved {
+                Span::raw("")
+            } else {
+                Span::styled(" +", Style::default().fg(FG_WARN))
+            };
+
             let bar = Span::styled(
                 wifi.strength_bar(),
                 Style::default().fg(strength_color(wifi.strength)),
@@ -123,6 +129,7 @@ fn build_connection_row<'a>(
             ListItem::new(Line::from(vec![
                 indicator,
                 name,
+                visible,
                 bar,
                 strength_pct,
                 lock,

@@ -67,6 +67,15 @@ fn build_lines(conn: &libnetman::connection::Connection) -> Vec<Line<'static>> {
     // Type-specific info
     match &conn.kind {
         ConnectionKind::Wifi(wifi) => {
+            field(
+                &mut lines,
+                "Saved",
+                if conn.saved {
+                    "Yes"
+                } else {
+                    "No (visible only)"
+                },
+            );
             field(&mut lines, "Type", "Wi-Fi");
             field(&mut lines, "SSID", &wifi.ssid);
             field(&mut lines, "Security", wifi.security.label());
