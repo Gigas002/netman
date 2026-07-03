@@ -30,5 +30,4 @@ toml = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # TUI
-crossterm = "0.29"
 ratatui = "0.30"

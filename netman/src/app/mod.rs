@@ -9,17 +9,17 @@ use std::time::Duration;
 
 use crate::ui::TextInput;
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
 use libnetman::connection::{
     Connection, ConnectionKind, ConnectionProfile, ConnectionStatus, EthernetProfile, Ipv4Profile,
     Ipv6Profile, NmState, VpnProfile, WifiProfile, WifiSecurity,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use tokio::time;
 #[cfg(feature = "dbus")]
 use tracing::debug;

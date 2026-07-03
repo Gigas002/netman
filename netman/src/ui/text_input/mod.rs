@@ -2,7 +2,7 @@
 
 //! Single-line text input with cursor movement and editing.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 /// Editable single-line text field.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
