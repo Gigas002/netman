@@ -291,6 +291,6 @@ fn truncate(s: &str, max_chars: usize) -> String {
     if chars.len() <= max_chars {
         s.to_owned()
     } else {
-        format!("{}…", &chars[..max_chars - 1].iter().collect::<String>())
+        format!("{}…", chars[..max_chars - 1].iter().collect::<String>())
     }
 }
