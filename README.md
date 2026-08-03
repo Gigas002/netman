@@ -8,12 +8,7 @@ GNOME panel applet.
 
 ## Requirements
 
-- A running **NetworkManager** daemon (for live operation)
-- Build with the default `dbus` feature enabled (see [Building](#building))
-
-Without NetworkManager or without the `dbus` feature, `netman` starts in **demo
-mode** with sample data — useful for UI development, but connect/disconnect,
-scan, and profile changes are disabled.
+- A running **NetworkManager** daemon
 
 ## Features
 
@@ -55,25 +50,6 @@ scan, and profile changes are disabled.
 - Wi-Fi: BSSID, band, security type
 - VPN: plugin service type
 
-## Workspace layout
-
-```
-netman/       — binary crate (TUI binary)
-libnetman/    — library crate (domain types + D-Bus integration)
-examples/     — example TOML configs
-docs/         — architecture and implementation plan
-```
-
-## Building
-
-```sh
-# Default build (D-Bus enabled — required for live NM interaction)
-cargo build --release
-
-# Minimal build (demo mode only; no D-Bus dependency)
-cargo build --release --no-default-features
-```
-
 ## Usage
 
 ```
@@ -90,33 +66,24 @@ Options:
 
 ### Keybindings
 
-| Key | Action |
-|-----|--------|
-| `↑` / `k` | Move selection up |
-| `↓` / `j` | Move selection down |
-| `Enter` | Connect to selected network |
-| `d` / `Del` | Disconnect selected network |
-| `D` | Delete selected saved profile (with confirmation) |
-| `e` | Edit selected saved profile |
-| `a` | Add new connection |
-| `r` / `F5` | Scan for Wi-Fi networks |
-| `n` | Toggle networking on/off |
-| `w` | Toggle Wi-Fi radio on/off |
-| `Tab` / `p` | Toggle detail panel |
-| `?` | Toggle help overlay |
-| `Esc` | Close overlay |
-| `q` | Quit |
-| `Ctrl+C` | Force quit |
+| Key         | Action                                            |
+| ----------- | ------------------------------------------------- |
+| `↑` / `k`   | Move selection up                                 |
+| `↓` / `j`   | Move selection down                               |
+| `Enter`     | Connect to selected network                       |
+| `d` / `Del` | Disconnect selected network                       |
+| `D`         | Delete selected saved profile (with confirmation) |
+| `e`         | Edit selected saved profile                       |
+| `a`         | Add new connection                                |
+| `r` / `F5`  | Scan for Wi-Fi networks                           |
+| `n`         | Toggle networking on/off                          |
+| `w`         | Toggle Wi-Fi radio on/off                         |
+| `Tab` / `p` | Toggle detail panel                               |
+| `?`         | Toggle help overlay                               |
+| `Esc`       | Close overlay                                     |
+| `q`         | Quit                                              |
+| `Ctrl+C`    | Force quit                                        |
 
 In modals (password prompt, connection editor, etc.): `Esc` cancels, `Enter`
 confirms, `Tab` / `Shift+Tab` moves between fields. Password fields support
 `Ctrl+H` to show/hide and `Ctrl+V` to paste.
-
-## Configuration
-
-Place a TOML file at `~/.config/netman/config.toml` (or pass `-c FILE`).
-See [`examples/netman.toml`](examples/netman.toml) for all options.
-
-## License
-
-`netman` is free software licensed under the [GNU General Public License v3.0 only](LICENSE).
