@@ -6,6 +6,8 @@
 VPN connections through NetworkManager, using the same D-Bus API as the
 GNOME panel applet.
 
+![](examples/preview.png)
+
 ## Requirements
 
 - A running **NetworkManager** daemon
