@@ -57,17 +57,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(area);
 
     // Horizontal split for body: list + optional detail panel.
-    let list_area;
-    let detail_area;
-    if app.show_detail {
+    let (list_area, detail_area) = if app.show_detail {
         let split = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(body_area);
-        list_area = split[0];
-        detail_area = Some(split[1]);
+        (split[0], Some(split[1]))
     } else {
-        list_area = body_area;
-        detail_area = None;
-    }
+        (body_area, None)
+    };
 
     connection_list::render(frame, list_area, app);
 
