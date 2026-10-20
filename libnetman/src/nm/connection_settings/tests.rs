@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use super::{apply_profile, parse_profile, profile_to_settings};
 use crate::connection::{
@@ -10,15 +10,15 @@ use crate::connection::{
     WifiSecurity,
 };
 
-fn str_value(s: &str) -> OwnedValue {
-    Value::from(s).try_into().unwrap()
+fn str_value(s: &str) -> OwnedVariant {
+    Variant::from(s).try_into().unwrap()
 }
 
-fn bytes_value(bytes: &[u8]) -> OwnedValue {
-    Value::from(bytes.to_vec()).try_into().unwrap()
+fn bytes_value(bytes: &[u8]) -> OwnedVariant {
+    Variant::from(bytes.to_vec()).try_into().unwrap()
 }
 
-fn wifi_raw() -> HashMap<String, HashMap<String, OwnedValue>> {
+fn wifi_raw() -> HashMap<String, HashMap<String, OwnedVariant>> {
     let mut settings = HashMap::new();
 
     let mut connection = HashMap::new();
@@ -93,7 +93,7 @@ fn parse_ethernet_profile() {
     settings.insert("connection".into(), connection);
 
     let mut eth = HashMap::new();
-    eth.insert("mtu".into(), Value::from(9000u32).try_into().unwrap());
+    eth.insert("mtu".into(), Variant::from(9000u32).try_into().unwrap());
     settings.insert("802-3-ethernet".into(), eth);
 
     let mut ipv4 = HashMap::new();
@@ -182,22 +182,24 @@ fn profile_to_settings_builds_new_wifi() {
 #[test]
 fn ipv6_and_autoconnect_round_trip() {
     let mut settings = wifi_raw();
-    settings
-        .get_mut("connection")
-        .unwrap()
-        .insert("autoconnect".into(), Value::from(false).try_into().unwrap());
+    settings.get_mut("connection").unwrap().insert(
+        "autoconnect".into(),
+        Variant::from(false).try_into().unwrap(),
+    );
     settings.get_mut("connection").unwrap().insert(
         "secondaries".into(),
-        Value::from(vec!["vpn-uuid".to_owned()]).try_into().unwrap(),
+        Variant::from(vec!["vpn-uuid".to_owned()])
+            .try_into()
+            .unwrap(),
     );
     let mut ipv6 = HashMap::new();
     ipv6.insert("method".into(), str_value("manual"));
-    let mut addr_entry: HashMap<String, OwnedValue> = HashMap::new();
+    let mut addr_entry: HashMap<String, OwnedVariant> = HashMap::new();
     addr_entry.insert("address".into(), str_value("2001:db8::1"));
-    addr_entry.insert("prefix".into(), Value::from(64u32).try_into().unwrap());
+    addr_entry.insert("prefix".into(), Variant::from(64u32).try_into().unwrap());
     ipv6.insert(
         "address-data".into(),
-        Value::from(vec![addr_entry]).try_into().unwrap(),
+        Variant::from(vec![addr_entry]).try_into().unwrap(),
     );
     settings.insert("ipv6".into(), ipv6);
 

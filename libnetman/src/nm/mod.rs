@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tracing::{debug, instrument, warn};
 use zbus::Connection;
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 use crate::{
     Result,
@@ -112,7 +112,6 @@ impl NmClient {
         for p in &active_paths {
             if let Ok(proxy) = ActiveConnectionProxy::builder(&self.conn)
                 .path(p.as_str())
-                .unwrap()
                 .build()
                 .await
             {
@@ -155,7 +154,6 @@ impl NmClient {
         let path = self.find_wireless_path().await?;
         let wireless = DeviceWirelessProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         wireless.request_scan(HashMap::new()).await?;
@@ -205,18 +203,21 @@ impl NmClient {
     pub async fn watch_active_state_changes(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<()>> {
+        use std::num::NonZeroUsize;
+
         use tokio_stream::StreamExt;
         use zbus::{MatchRule, message::Type};
 
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
-            .interface("org.freedesktop.NetworkManager.Connection.Active")?
-            .member("StateChanged")?
-            .build();
+            .interface("org.freedesktop.NetworkManager.Connection.Active")
+            .member("StateChanged")
+            .build()?;
 
-        let mut stream = zbus::MessageStream::for_match_rule(rule, &self.conn, Some(64))
-            .await
-            .map_err(|e| Error::DBus(e.to_string()))?;
+        let mut stream =
+            zbus::MessageStream::for_match_rule(rule, &self.conn, NonZeroUsize::new(64))
+                .await
+                .map_err(|e| Error::DBus(e.to_string()))?;
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -249,7 +250,6 @@ impl NmClient {
         let updated = apply_profile(&raw, profile)?;
         let sc = SettingsConnectionProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         sc.update2(updated, UPDATE2_TO_DISK).await?;
@@ -270,7 +270,6 @@ impl NmClient {
         let path = nm_settings.add_connection(settings).await?;
         let sc = SettingsConnectionProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         let raw = sc.get_settings().await?;
@@ -328,7 +327,6 @@ impl NmClient {
         let path = settings.get_connection_by_uuid(uuid).await?;
         let sc = SettingsConnectionProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         sc.delete().await?;
@@ -343,7 +341,6 @@ impl NmClient {
         for p in &active_paths {
             let proxy = ActiveConnectionProxy::builder(&self.conn)
                 .path(p.as_str())
-                .unwrap()
                 .build()
                 .await?;
             if proxy.uuid().await? == uuid {
@@ -360,19 +357,18 @@ impl NmClient {
         &self,
         uuid: &str,
     ) -> Result<(
-        HashMap<String, HashMap<String, OwnedValue>>,
-        Option<HashMap<String, HashMap<String, OwnedValue>>>,
+        HashMap<String, HashMap<String, OwnedVariant>>,
+        Option<HashMap<String, HashMap<String, OwnedVariant>>>,
     )> {
         let settings = SettingsProxy::new(&self.conn).await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
         let sc = SettingsConnectionProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         let raw = sc.get_settings().await?;
 
-        let mut secrets: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+        let mut secrets: HashMap<String, HashMap<String, OwnedVariant>> = HashMap::new();
         if raw.contains_key("802-11-wireless-security")
             && let Ok(s) = sc.get_secrets("802-11-wireless-security").await
         {
@@ -410,7 +406,6 @@ impl NmClient {
         for path in settings.list_connections().await? {
             let sc = SettingsConnectionProxy::builder(&self.conn)
                 .path(path.as_str())
-                .map_err(|e| Error::DBus(e.to_string()))?
                 .build()
                 .await?;
             let raw = sc.get_settings().await?;
@@ -428,12 +423,11 @@ impl NmClient {
 
     async fn build_connection(
         &self,
-        path: &zbus::zvariant::OwnedObjectPath,
+        path: &zbus::OwnedObjectPath,
         active_proxies: &[ActiveConnectionProxy<'_>],
     ) -> Result<NmConn> {
         let sc = SettingsConnectionProxy::builder(&self.conn)
             .path(path.as_str())
-            .unwrap()
             .build()
             .await?;
 
@@ -497,7 +491,6 @@ impl NmClient {
         let path = paths.first()?;
         let dev = DeviceProxy::builder(&self.conn)
             .path(path.as_str())
-            .ok()?
             .build()
             .await
             .ok()?;
@@ -511,7 +504,6 @@ impl NmClient {
         }
         let cfg = Ip4ConfigProxy::builder(&self.conn)
             .path(path.as_str())
-            .ok()?
             .build()
             .await
             .ok()?;
@@ -526,7 +518,6 @@ impl NmClient {
         }
         let cfg = Ip6ConfigProxy::builder(&self.conn)
             .path(path.as_str())
-            .ok()?
             .build()
             .await
             .ok()?;
@@ -537,7 +528,7 @@ impl NmClient {
     async fn build_kind(
         &self,
         conn_type: &str,
-        raw: &HashMap<String, HashMap<String, OwnedValue>>,
+        raw: &HashMap<String, HashMap<String, OwnedVariant>>,
     ) -> ConnectionKind {
         match conn_type {
             "802-11-wireless" => ConnectionKind::Wifi(self.build_wifi_info(raw)),
@@ -554,7 +545,7 @@ impl NmClient {
         }
     }
 
-    fn build_wifi_info(&self, raw: &HashMap<String, HashMap<String, OwnedValue>>) -> WifiInfo {
+    fn build_wifi_info(&self, raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> WifiInfo {
         let wifi_section = raw.get("802-11-wireless");
 
         // SSID is D-Bus type `ay` (array of bytes).
@@ -590,7 +581,7 @@ impl NmClient {
 
     fn detect_wifi_security(
         &self,
-        raw: &HashMap<String, HashMap<String, OwnedValue>>,
+        raw: &HashMap<String, HashMap<String, OwnedVariant>>,
     ) -> WifiSecurity {
         if raw.get("802-1x").is_some() {
             return WifiSecurity::Enterprise;
@@ -608,12 +599,11 @@ impl NmClient {
         }
     }
 
-    async fn find_wireless_path(&self) -> Result<zbus::zvariant::OwnedObjectPath> {
+    async fn find_wireless_path(&self) -> Result<zbus::OwnedObjectPath> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;
         for path in nm.devices().await? {
             let dev = DeviceProxy::builder(&self.conn)
                 .path(path.as_str())
-                .map_err(|e| Error::DBus(e.to_string()))?
                 .build()
                 .await?;
             if dev.device_type().await? == DEVICE_TYPE_WIFI {
@@ -627,7 +617,6 @@ impl NmClient {
         let path = self.find_wireless_path().await?;
         let wireless = DeviceWirelessProxy::builder(&self.conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         let paths = wireless.get_all_access_points().await?;
@@ -646,7 +635,6 @@ impl NmClient {
     async fn build_access_point(&self, path: &str) -> Result<WifiInfo> {
         let ap = AccessPointProxy::builder(&self.conn)
             .path(path)
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
 
@@ -671,25 +659,25 @@ impl NmClient {
     }
 }
 
-// ── zvariant value extraction helpers ────────────────────────────────────────
+// ── D-Bus variant extraction helpers ─────────────────────────────────────────
 
 /// Extract a `String` from a nested `section → key` in a NM settings map.
 fn get_str_field(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
     section: &str,
     key: &str,
 ) -> Option<String> {
     get_str_value(raw.get(section)?, key)
 }
 
-/// Extract a `String` from an `OwnedValue` map by key using `TryFrom<&OwnedValue>`.
-fn get_str_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+/// Extract a `String` from an `OwnedVariant` map by key using `TryFrom<&OwnedVariant>`.
+fn get_str_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<String> {
     let v = map.get(key)?;
     <&str>::try_from(v).ok().map(str::to_owned)
 }
 
-/// Extract a `u32` from an `OwnedValue` map by key using `TryFrom<&OwnedValue>`.
-fn get_u32_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
+/// Extract a `u32` from an `OwnedVariant` map by key using `TryFrom<&OwnedVariant>`.
+fn get_u32_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<u32> {
     let v = map.get(key)?;
     u32::try_from(v).ok()
 }
@@ -733,7 +721,7 @@ async fn parse_ip6_config(cfg: &Ip6ConfigProxy<'_>) -> Option<Ip6Config> {
 }
 
 fn parse_live_ip_config(
-    addresses: &[HashMap<String, OwnedValue>],
+    addresses: &[HashMap<String, OwnedVariant>],
     default_prefix: u32,
 ) -> Option<String> {
     addresses.first().and_then(|a| {

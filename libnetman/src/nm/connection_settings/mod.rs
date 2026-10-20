@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use uuid::Uuid;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::{
     Result,
@@ -21,8 +21,8 @@ pub const UPDATE2_TO_DISK: u32 = 0x1;
 
 /// Parse a saved connection profile from NM settings (and optional secrets).
 pub fn parse_profile(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
-    secrets: Option<&HashMap<String, HashMap<String, OwnedValue>>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
+    secrets: Option<&HashMap<String, HashMap<String, OwnedVariant>>>,
 ) -> ConnectionProfile {
     let conn_type = get_str_field(raw, "connection", "type").unwrap_or_default();
     let id = get_str_field(raw, "connection", "id").unwrap_or_else(|| "Unknown".into());
@@ -40,9 +40,9 @@ pub fn parse_profile(
 
 /// Merge editable profile fields into an existing NM settings dict.
 pub fn apply_profile(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
     profile: &ConnectionProfile,
-) -> Result<HashMap<String, HashMap<String, OwnedValue>>> {
+) -> Result<HashMap<String, HashMap<String, OwnedVariant>>> {
     let mut settings = raw.clone();
 
     match profile {
@@ -62,10 +62,10 @@ pub fn apply_profile(
 /// Build a complete NM settings dict for a new connection profile.
 pub fn profile_to_settings(
     profile: &ConnectionProfile,
-) -> Result<HashMap<String, HashMap<String, OwnedValue>>> {
+) -> Result<HashMap<String, HashMap<String, OwnedVariant>>> {
     validate_new_profile(profile)?;
 
-    let mut settings: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+    let mut settings: HashMap<String, HashMap<String, OwnedVariant>> = HashMap::new();
     let mut connection = HashMap::new();
     connection.insert("uuid".into(), str_value(&Uuid::new_v4().to_string()));
 
@@ -145,8 +145,8 @@ fn validate_new_profile(profile: &ConnectionProfile) -> Result<()> {
 }
 
 fn parse_wifi(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
-    secrets: Option<&HashMap<String, HashMap<String, OwnedValue>>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
+    secrets: Option<&HashMap<String, HashMap<String, OwnedVariant>>>,
 ) -> WifiProfile {
     let ssid = raw
         .get("802-11-wireless")
@@ -184,7 +184,7 @@ fn parse_wifi(
     }
 }
 
-fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> EthernetProfile {
+fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> EthernetProfile {
     let name = get_str_field(raw, "connection", "id").unwrap_or_default();
     let eth = raw.get("802-3-ethernet");
     let mtu = eth
@@ -207,8 +207,8 @@ fn parse_ethernet(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Etherne
 }
 
 fn parse_vpn(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
-    secrets: Option<&HashMap<String, HashMap<String, OwnedValue>>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
+    secrets: Option<&HashMap<String, HashMap<String, OwnedVariant>>>,
 ) -> VpnProfile {
     let vpn_section = raw.get("vpn");
     let service_type = get_str_field(raw, "vpn", "service-type").unwrap_or_default();
@@ -246,11 +246,11 @@ fn parse_vpn(
     }
 }
 
-fn parse_ipv4(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv4Profile {
+fn parse_ipv4(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> Ipv4Profile {
     parse_ip_profile(raw.get("ipv4"), 24)
 }
 
-fn parse_ipv6(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv6Profile {
+fn parse_ipv6(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> Ipv6Profile {
     let parsed = parse_ip_profile(raw.get("ipv6"), 64);
     Ipv6Profile {
         method: parsed.method,
@@ -262,7 +262,7 @@ fn parse_ipv6(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Ipv6Profile
 }
 
 fn apply_wifi(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     wifi: &WifiProfile,
     for_new: bool,
 ) -> Result<()> {
@@ -323,7 +323,7 @@ fn apply_wifi(
 }
 
 fn apply_ethernet(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     eth: &EthernetProfile,
 ) -> Result<()> {
     if let Some(connection) = settings.get_mut("connection")
@@ -359,7 +359,7 @@ fn apply_ethernet(
 }
 
 fn apply_vpn(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     vpn: &VpnProfile,
 ) -> Result<()> {
     if vpn.service_type.trim().is_empty() {
@@ -426,14 +426,14 @@ fn apply_vpn(
 }
 
 fn apply_ipv4(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     ipv4: &Ipv4Profile,
 ) -> Result<()> {
     apply_ip_profile(settings, "ipv4", ipv4, 24)
 }
 
 fn apply_ipv6(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     ipv6: &Ipv6Profile,
 ) -> Result<()> {
     let ip = Ipv4Profile {
@@ -447,7 +447,7 @@ fn apply_ipv6(
 }
 
 fn apply_link_options(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     autoconnect: bool,
     vpn_secondary: Option<&str>,
 ) -> Result<()> {
@@ -461,13 +461,13 @@ fn apply_link_options(
     Ok(())
 }
 
-fn parse_autoconnect(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> bool {
+fn parse_autoconnect(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> bool {
     raw.get("connection")
         .and_then(|s| get_bool_value(s, "autoconnect"))
         .unwrap_or(true)
 }
 
-fn parse_vpn_secondary(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Option<String> {
+fn parse_vpn_secondary(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> Option<String> {
     let values = raw
         .get("connection")
         .and_then(|s| get_str_array(s, "secondaries"))?;
@@ -475,7 +475,7 @@ fn parse_vpn_secondary(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> Op
 }
 
 fn parse_ip_profile(
-    section: Option<&HashMap<String, OwnedValue>>,
+    section: Option<&HashMap<String, OwnedVariant>>,
     default_prefix: u32,
 ) -> Ipv4Profile {
     let method = section
@@ -514,7 +514,7 @@ fn parse_ip_profile(
 }
 
 fn parse_vpn_gateway(
-    vpn_section: Option<&HashMap<String, OwnedValue>>,
+    vpn_section: Option<&HashMap<String, OwnedVariant>>,
     service_type: &str,
 ) -> String {
     let Some(section) = vpn_section else {
@@ -546,7 +546,11 @@ fn vpn_gateway_keys(service_type: &str) -> &'static [&'static str] {
     }
 }
 
-fn apply_vpn_gateway(section: &mut HashMap<String, OwnedValue>, service_type: &str, gateway: &str) {
+fn apply_vpn_gateway(
+    section: &mut HashMap<String, OwnedVariant>,
+    service_type: &str,
+    gateway: &str,
+) {
     for key in ALL_VPN_GATEWAY_KEYS {
         section.remove(*key);
     }
@@ -568,7 +572,7 @@ const ALL_VPN_GATEWAY_KEYS: &[&str] = &[
 ];
 
 fn apply_ip_profile(
-    settings: &mut HashMap<String, HashMap<String, OwnedValue>>,
+    settings: &mut HashMap<String, HashMap<String, OwnedVariant>>,
     section_name: &str,
     ip: &Ipv4Profile,
     default_prefix: u32,
@@ -615,7 +619,7 @@ fn apply_ip_profile(
     Ok(())
 }
 
-fn detect_wifi_security(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> WifiSecurity {
+fn detect_wifi_security(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> WifiSecurity {
     if raw.get("802-1x").is_some() {
         return WifiSecurity::Enterprise;
     }
@@ -653,31 +657,31 @@ fn ip_method_to_nm(method: IpMethod) -> &'static str {
 }
 
 fn get_address_data(
-    section: &HashMap<String, OwnedValue>,
+    section: &HashMap<String, OwnedVariant>,
     default_prefix: u32,
 ) -> Option<(String, u32)> {
     let data = section.get("address-data")?;
-    let entries: Vec<HashMap<String, OwnedValue>> = Vec::try_from(data.try_clone().ok()?).ok()?;
+    let entries: Vec<HashMap<String, OwnedVariant>> = Vec::try_from(data.try_clone().ok()?).ok()?;
     let first = entries.first()?;
     let address = get_str_value(first, "address")?;
     let prefix = get_u32_value(first, "prefix").unwrap_or(default_prefix);
     Some((address, prefix))
 }
 
-fn get_legacy_address(section: &HashMap<String, OwnedValue>) -> Option<(String, u32)> {
+fn get_legacy_address(section: &HashMap<String, OwnedVariant>) -> Option<(String, u32)> {
     let data = section.get("addresses")?;
     let entries: Vec<(String, u32)> = Vec::try_from(data.try_clone().ok()?).ok()?;
     let (address, prefix) = entries.first()?.clone();
     Some((address, prefix))
 }
 
-fn get_dns_data(section: &HashMap<String, OwnedValue>) -> Option<String> {
+fn get_dns_data(section: &HashMap<String, OwnedVariant>) -> Option<String> {
     let data = section.get("dns-data")?;
-    let entries: Vec<HashMap<String, OwnedValue>> = Vec::try_from(data.try_clone().ok()?).ok()?;
+    let entries: Vec<HashMap<String, OwnedVariant>> = Vec::try_from(data.try_clone().ok()?).ok()?;
     entries.first().and_then(|e| get_str_value(e, "address"))
 }
 
-fn get_legacy_dns(section: &HashMap<String, OwnedValue>) -> Option<String> {
+fn get_legacy_dns(section: &HashMap<String, OwnedVariant>) -> Option<String> {
     let data = section.get("dns")?;
     let entries: Vec<u32> = Vec::try_from(data.try_clone().ok()?).ok()?;
     let raw = *entries.first()?;
@@ -689,72 +693,72 @@ fn get_legacy_dns(section: &HashMap<String, OwnedValue>) -> Option<String> {
 }
 
 fn get_str_field(
-    raw: &HashMap<String, HashMap<String, OwnedValue>>,
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
     section: &str,
     key: &str,
 ) -> Option<String> {
     get_str_value(raw.get(section)?, key)
 }
 
-fn get_str_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+fn get_str_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<String> {
     let v = map.get(key)?;
     <&str>::try_from(v).ok().map(str::to_owned)
 }
 
-fn get_u32_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
+fn get_u32_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<u32> {
     let v = map.get(key)?;
     u32::try_from(v).ok()
 }
 
-fn get_bool_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> {
+fn get_bool_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<bool> {
     let v = map.get(key)?;
     bool::try_from(v).ok()
 }
 
-fn get_str_array(map: &HashMap<String, OwnedValue>, key: &str) -> Option<Vec<String>> {
+fn get_str_array(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<Vec<String>> {
     let v = map.get(key)?;
     Vec::<String>::try_from(v.try_clone().ok()?).ok()
 }
 
-fn str_value(s: &str) -> OwnedValue {
-    Value::from(s).try_into().expect("string OwnedValue")
+fn str_value(s: &str) -> OwnedVariant {
+    Variant::from(s).try_into().expect("string OwnedVariant")
 }
 
-fn bytes_value(bytes: &[u8]) -> OwnedValue {
-    Value::from(bytes.to_vec())
+fn bytes_value(bytes: &[u8]) -> OwnedVariant {
+    Variant::from(bytes.to_vec())
         .try_into()
-        .expect("bytes OwnedValue")
+        .expect("bytes OwnedVariant")
 }
 
-fn bool_value(value: bool) -> OwnedValue {
-    Value::from(value).try_into().expect("bool OwnedValue")
+fn bool_value(value: bool) -> OwnedVariant {
+    Variant::from(value).try_into().expect("bool OwnedVariant")
 }
 
-fn u32_value(value: u32) -> OwnedValue {
-    Value::from(value).try_into().expect("u32 OwnedValue")
+fn u32_value(value: u32) -> OwnedVariant {
+    Variant::from(value).try_into().expect("u32 OwnedVariant")
 }
 
-fn address_data_value(address: &str, prefix: u32) -> OwnedValue {
-    let mut entry: HashMap<String, OwnedValue> = HashMap::new();
+fn address_data_value(address: &str, prefix: u32) -> OwnedVariant {
+    let mut entry: HashMap<String, OwnedVariant> = HashMap::new();
     entry.insert("address".into(), str_value(address));
     entry.insert("prefix".into(), u32_value(prefix));
-    Value::from(vec![entry])
+    Variant::from(vec![entry])
         .try_into()
-        .expect("address-data OwnedValue")
+        .expect("address-data OwnedVariant")
 }
 
-fn dns_data_value(dns: &str) -> OwnedValue {
-    let mut entry: HashMap<String, OwnedValue> = HashMap::new();
+fn dns_data_value(dns: &str) -> OwnedVariant {
+    let mut entry: HashMap<String, OwnedVariant> = HashMap::new();
     entry.insert("address".into(), str_value(dns));
-    Value::from(vec![entry])
+    Variant::from(vec![entry])
         .try_into()
-        .expect("dns-data OwnedValue")
+        .expect("dns-data OwnedVariant")
 }
 
-fn str_array_value(values: &[String]) -> OwnedValue {
-    Value::from(values.to_vec())
+fn str_array_value(values: &[String]) -> OwnedVariant {
+    Variant::from(values.to_vec())
         .try_into()
-        .expect("string array OwnedValue")
+        .expect("string array OwnedVariant")
 }
 
 #[cfg(test)]
