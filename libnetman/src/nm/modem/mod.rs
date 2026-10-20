@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use tracing::warn;
-use zbus::zvariant::OwnedValue;
+use zbus::OwnedVariant;
 
 use super::proxies::{
     DeviceModemProxy, DeviceProxy, MmModem3gppProxy, MmModemProxy, MmSimProxy, NetworkManagerProxy,
@@ -33,7 +33,7 @@ const NM_MODEM_CAP_LTE: u32 = 0x4;
 const NM_MODEM_CAP_5GNR: u32 = 0x8;
 
 /// Build initial modem info from a saved GSM connection profile.
-pub fn build_modem_info(raw: &HashMap<String, HashMap<String, OwnedValue>>) -> ModemInfo {
+pub fn build_modem_info(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> ModemInfo {
     let apn = raw
         .get("gsm")
         .and_then(|s| get_str_value(s, "apn"))
@@ -84,7 +84,6 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
     for path in nm.devices().await? {
         let dev = DeviceProxy::builder(conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
         if dev.device_type().await? != DEVICE_TYPE_MODEM {
@@ -93,7 +92,6 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
 
         let modem = DeviceModemProxy::builder(conn)
             .path(path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
 
@@ -104,7 +102,6 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
 
         let mm = MmModemProxy::builder(conn)
             .path(device_id.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
 
@@ -120,7 +117,6 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
 
         let sim = MmSimProxy::builder(conn)
             .path(sim_path.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await?;
 
@@ -135,11 +131,7 @@ async fn build_modem_live_data(
     conn: &zbus::Connection,
     path: &str,
 ) -> Result<Option<ModemLiveData>> {
-    let dev = DeviceProxy::builder(conn)
-        .path(path)
-        .map_err(|e| Error::DBus(e.to_string()))?
-        .build()
-        .await?;
+    let dev = DeviceProxy::builder(conn).path(path).build().await?;
 
     if dev.device_type().await? != DEVICE_TYPE_MODEM {
         return Ok(None);
@@ -147,11 +139,7 @@ async fn build_modem_live_data(
 
     let interface = dev.interface().await.unwrap_or_default();
 
-    let modem = DeviceModemProxy::builder(conn)
-        .path(path)
-        .map_err(|e| Error::DBus(e.to_string()))?
-        .build()
-        .await?;
+    let modem = DeviceModemProxy::builder(conn).path(path).build().await?;
 
     let operator_code = modem.operator_code().await.ok().filter(|c| !c.is_empty());
     let apn = modem.apn().await.ok().filter(|a| !a.is_empty());
@@ -166,7 +154,6 @@ async fn build_modem_live_data(
     if !device_id.is_empty()
         && let Ok(mm) = MmModemProxy::builder(conn)
             .path(device_id.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await
     {
@@ -182,7 +169,6 @@ async fn build_modem_live_data(
 
         if let Ok(mm3gpp) = MmModem3gppProxy::builder(conn)
             .path(device_id.as_str())
-            .map_err(|e| Error::DBus(e.to_string()))?
             .build()
             .await
         {
@@ -225,7 +211,7 @@ fn mm_access_technology(tech: u32) -> AccessTechnology {
     }
 }
 
-fn get_str_value(map: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+fn get_str_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<String> {
     let v = map.get(key)?;
     <&str>::try_from(v).ok().map(str::to_owned)
 }

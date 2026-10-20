@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use zbus::{proxy, zvariant::OwnedObjectPath, zvariant::OwnedValue};
+use zbus::{OwnedObjectPath, OwnedVariant, proxy};
 
 // ── org.freedesktop.NetworkManager ───────────────────────────────────────────
 
@@ -60,7 +60,7 @@ pub trait NetworkManager {
     /// Add a new connection from settings and activate it immediately.
     fn add_and_activate_connection(
         &self,
-        connection: HashMap<String, HashMap<String, OwnedValue>>,
+        connection: HashMap<String, HashMap<String, OwnedVariant>>,
         device: &str,
         specific_object: &str,
     ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
@@ -83,7 +83,7 @@ pub trait Settings {
     /// Add a new connection profile from settings.
     fn add_connection(
         &self,
-        connection: HashMap<String, HashMap<String, OwnedValue>>,
+        connection: HashMap<String, HashMap<String, OwnedVariant>>,
     ) -> zbus::Result<OwnedObjectPath>;
 }
 
@@ -95,23 +95,23 @@ pub trait Settings {
 )]
 pub trait SettingsConnection {
     /// Return all settings for this connection profile.
-    fn get_settings(&self) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+    fn get_settings(&self) -> zbus::Result<HashMap<String, HashMap<String, OwnedVariant>>>;
 
     /// Return secrets for the given settings section (e.g. `802-11-wireless-security`).
     fn get_secrets(
         &self,
         setting_name: &str,
-    ) -> zbus::Result<HashMap<String, HashMap<String, OwnedValue>>>;
+    ) -> zbus::Result<HashMap<String, HashMap<String, OwnedVariant>>>;
 
     /// Update connection settings and persist to disk when `flags` includes `TO_DISK`.
     fn update2(
         &self,
-        settings: HashMap<String, HashMap<String, OwnedValue>>,
+        settings: HashMap<String, HashMap<String, OwnedVariant>>,
         flags: u32,
     ) -> zbus::Result<(
-        HashMap<String, HashMap<String, OwnedValue>>,
-        HashMap<String, OwnedValue>,
-        HashMap<String, OwnedValue>,
+        HashMap<String, HashMap<String, OwnedVariant>>,
+        HashMap<String, OwnedVariant>,
+        HashMap<String, OwnedVariant>,
     )>;
 
     /// Remove this connection profile from NetworkManager.
@@ -174,7 +174,7 @@ pub trait Device {
 )]
 pub trait DeviceWireless {
     /// Request a Wi-Fi scan (non-blocking; results come via AccessPoints property).
-    fn request_scan(&self, options: HashMap<String, OwnedValue>) -> zbus::Result<()>;
+    fn request_scan(&self, options: HashMap<String, OwnedVariant>) -> zbus::Result<()>;
 
     /// All access points visible to this device.
     fn get_all_access_points(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
@@ -225,7 +225,7 @@ pub trait AccessPoint {
 pub trait Ip4Config {
     /// List of address data maps (keys: `address`, `prefix`).
     #[zbus(property)]
-    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
 
     /// Default gateway address string.
     #[zbus(property)]
@@ -233,7 +233,7 @@ pub trait Ip4Config {
 
     /// List of nameserver data maps (key: `address`).
     #[zbus(property)]
-    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
 }
 
 // ── org.freedesktop.NetworkManager.IP6Config ─────────────────────────────────
@@ -245,7 +245,7 @@ pub trait Ip4Config {
 pub trait Ip6Config {
     /// List of address data maps (keys: `address`, `prefix`).
     #[zbus(property)]
-    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+    fn address_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
 
     /// Default gateway address string.
     #[zbus(property)]
@@ -253,7 +253,7 @@ pub trait Ip6Config {
 
     /// List of nameserver data maps (key: `address`).
     #[zbus(property)]
-    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedValue>>>;
+    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
 }
 
 // ── org.freedesktop.NetworkManager.Device.Modem ───────────────────────────────

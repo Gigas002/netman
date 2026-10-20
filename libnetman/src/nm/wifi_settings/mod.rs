@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use uuid::Uuid;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::{OwnedVariant, Variant};
 
 use crate::{Result, connection::WifiSecurity, error::Error};
 
@@ -15,7 +15,7 @@ pub fn wifi_connection_settings(
     security: WifiSecurity,
     password: Option<&str>,
     hidden: bool,
-) -> Result<HashMap<String, HashMap<String, OwnedValue>>> {
+) -> Result<HashMap<String, HashMap<String, OwnedVariant>>> {
     if ssid.is_empty() {
         return Err(Error::OperationFailed("SSID must not be empty".into()));
     }
@@ -41,7 +41,7 @@ pub fn wifi_connection_settings(
         }
     }
 
-    let mut settings: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+    let mut settings: HashMap<String, HashMap<String, OwnedVariant>> = HashMap::new();
 
     let mut connection = HashMap::new();
     connection.insert("type".into(), str_value("802-11-wireless"));
@@ -85,18 +85,18 @@ pub fn wifi_connection_settings(
     Ok(settings)
 }
 
-fn str_value(s: &str) -> OwnedValue {
-    Value::from(s).try_into().expect("string OwnedValue")
+fn str_value(s: &str) -> OwnedVariant {
+    Variant::from(s).try_into().expect("string OwnedVariant")
 }
 
-fn bytes_value(bytes: &[u8]) -> OwnedValue {
-    Value::from(bytes.to_vec())
+fn bytes_value(bytes: &[u8]) -> OwnedVariant {
+    Variant::from(bytes.to_vec())
         .try_into()
-        .expect("bytes OwnedValue")
+        .expect("bytes OwnedVariant")
 }
 
-fn bool_value(value: bool) -> OwnedValue {
-    Value::from(value).try_into().expect("bool OwnedValue")
+fn bool_value(value: bool) -> OwnedVariant {
+    Variant::from(value).try_into().expect("bool OwnedVariant")
 }
 
 #[cfg(test)]

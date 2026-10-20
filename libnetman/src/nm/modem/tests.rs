@@ -27,12 +27,12 @@ fn caps_to_access_technology_prefers_5g() {
 #[test]
 fn build_modem_info_reads_apn() {
     use std::collections::HashMap;
-    use zbus::zvariant::Value;
+    use zbus::Variant;
 
     let mut gsm = HashMap::new();
     gsm.insert(
         "apn".to_owned(),
-        Value::from("internet").try_into().unwrap(),
+        Variant::from("internet").try_into().unwrap(),
     );
     let mut raw = HashMap::new();
     raw.insert("gsm".to_owned(), gsm);
