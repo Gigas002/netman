@@ -14,5 +14,9 @@ All notable changes to `netman` are documented here.
   with `InvalidArgs`.
 - Toggling networking (`n`) failed: it wrote the read-only `NetworkingEnabled`
   property instead of calling NM's `Enable` method.
+- Wi-Fi security was read with the wrong NM flag bits. Enhanced Open (OWE)
+  networks showed as WEP and could not be joined; WPA2/WPA3 transition networks
+  were joined as WPA3-only, which fails on adapters without SAE; WPA1 networks
+  showed as WPA2. OWE networks are now joined without a password.
 
 ## [0.1.0] - 2026-09-04

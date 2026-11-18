@@ -12,24 +12,68 @@ use crate::connection::{ConnectionProfile, ConnectionStatus, WifiSecurity};
 use super::security_from_ap;
 use fake::{FakeNm, Settings};
 
+// Flag values as NM reports them (NM80211ApSecurityFlags): pairwise and
+// group CCMP are 0x8 | 0x80, TKIP 0x4 | 0x40.
+const CCMP: u32 = 0x8 | 0x80;
+const PSK: u32 = 0x100;
+const EAP: u32 = 0x200;
+const SAE: u32 = 0x400;
+const OWE: u32 = 0x800;
+const PRIVACY: u32 = 0x1;
+
 #[test]
 fn security_from_ap_open() {
     assert_eq!(security_from_ap(0, 0, 0), WifiSecurity::None);
 }
 
 #[test]
+fn security_from_ap_wep() {
+    assert_eq!(security_from_ap(PRIVACY, 0, 0), WifiSecurity::Wep);
+}
+
+#[test]
+fn security_from_ap_wpa1_psk() {
+    assert_eq!(
+        security_from_ap(PRIVACY, PSK | 0x4 | 0x40, 0),
+        WifiSecurity::Wpa
+    );
+}
+
+#[test]
 fn security_from_ap_wpa2_psk() {
-    assert_eq!(security_from_ap(0, 0, 0x102), WifiSecurity::Wpa2);
+    assert_eq!(security_from_ap(PRIVACY, 0, PSK | CCMP), WifiSecurity::Wpa2);
 }
 
 #[test]
 fn security_from_ap_wpa3_sae() {
-    assert_eq!(security_from_ap(0, 0, 0x400), WifiSecurity::Wpa3);
+    assert_eq!(security_from_ap(PRIVACY, 0, SAE | CCMP), WifiSecurity::Wpa3);
+}
+
+#[test]
+fn security_from_ap_wpa2_wpa3_transition_takes_a_password_profile() {
+    assert_eq!(
+        security_from_ap(PRIVACY, 0, PSK | SAE | CCMP),
+        WifiSecurity::Wpa2
+    );
+}
+
+#[test]
+fn security_from_ap_owe_is_not_wep() {
+    assert_eq!(security_from_ap(PRIVACY, 0, OWE | CCMP), WifiSecurity::Owe);
 }
 
 #[test]
 fn security_from_ap_enterprise() {
-    assert_eq!(security_from_ap(0, 0, 0x200), WifiSecurity::Enterprise);
+    assert_eq!(
+        security_from_ap(PRIVACY, 0, EAP | CCMP),
+        WifiSecurity::Enterprise
+    );
+}
+
+#[test]
+fn security_from_ap_pairwise_wep_bits_are_not_wpa() {
+    // 0x1 / 0x2 are PAIR_WEP40 / PAIR_WEP104, not WPA / RSN.
+    assert_eq!(security_from_ap(PRIVACY, 0, 0x2), WifiSecurity::Wep);
 }
 
 // ── NmClient against the fake ────────────────────────────────────────────────
@@ -162,6 +206,29 @@ async fn set_wireless_enabled_writes_the_property() {
     );
 }
 
+#[tokio::test]
+async fn access_points_report_their_security() {
+    let (fake, nm) = FakeNm::start().await;
+    let dev = fake.add_wifi_device("wlan0").await;
+    for (ssid, rsn) in [
+        ("Mixed", PSK | SAE | CCMP),
+        ("Enhanced-Open", OWE | CCMP),
+        ("Sae-Only", SAE | CCMP),
+    ] {
+        fake.add_ap(&dev, ssid.as_bytes(), 50, 5180, PRIVACY, 0, rsn)
+            .await;
+    }
+
+    let conns = nm.connections().await.expect("connections");
+    let security = |ssid: &str| match &conns.iter().find(|c| c.id == ssid).unwrap().kind {
+        crate::connection::ConnectionKind::Wifi(w) => w.security,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(security("Mixed"), WifiSecurity::Wpa2);
+    assert_eq!(security("Enhanced-Open"), WifiSecurity::Owe);
+    assert_eq!(security("Sae-Only"), WifiSecurity::Wpa3);
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
@@ -183,6 +250,8 @@ mod fake {
         pub devices: Vec<OwnedObjectPath>,
         pub active: Vec<(OwnedObjectPath, String)>,
         pub connections: Vec<(OwnedObjectPath, Settings)>,
+        /// Access points, as (device, access point).
+        pub access_points: Vec<(OwnedObjectPath, OwnedObjectPath)>,
         /// Method calls NM received, as `"Member arg arg"`.
         pub calls: Vec<String>,
         next_id: u32,
@@ -222,6 +291,7 @@ mod fake {
                 devices: Vec::new(),
                 active: Vec::new(),
                 connections: Vec::new(),
+                access_points: Vec::new(),
                 calls: Vec::new(),
                 next_id: 0,
             }));
@@ -276,10 +346,53 @@ mod fake {
                 .await
                 .expect("serve Device");
             server
-                .at(&p, Wireless::default())
+                .at(
+                    &p,
+                    Wireless {
+                        state: self.state.clone(),
+                        path: p.clone(),
+                    },
+                )
                 .await
                 .expect("serve Wireless");
             self.state.lock().unwrap().devices.push(p.clone());
+            p
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub async fn add_ap(
+            &self,
+            device: &OwnedObjectPath,
+            ssid: &[u8],
+            strength: u8,
+            frequency: u32,
+            flags: u32,
+            wpa_flags: u32,
+            rsn_flags: u32,
+        ) -> OwnedObjectPath {
+            let p = self
+                .state
+                .lock()
+                .unwrap()
+                .next_path(&format!("{NM_PATH}/AccessPoint"));
+            let ap = AccessPoint {
+                ssid: ssid.to_vec(),
+                strength,
+                frequency,
+                flags,
+                wpa_flags,
+                rsn_flags,
+            };
+            self.server
+                .object_server()
+                .at(&p, ap)
+                .await
+                .expect("serve AccessPoint");
+            self.state
+                .lock()
+                .unwrap()
+                .access_points
+                .push((device.clone(), p.clone()));
             p
         }
     }
@@ -575,17 +688,72 @@ mod fake {
         }
     }
 
-    #[derive(Default)]
     struct Wireless {
-        access_points: Vec<OwnedObjectPath>,
+        state: Shared,
+        path: OwnedObjectPath,
     }
 
     #[interface(name = "org.freedesktop.NetworkManager.Device.Wireless")]
     impl Wireless {
         fn get_all_access_points(&self) -> Vec<OwnedObjectPath> {
-            self.access_points.clone()
+            let s = self.state.lock().unwrap();
+            s.access_points
+                .iter()
+                .filter(|(dev, _)| *dev == self.path)
+                .map(|(_, ap)| ap.clone())
+                .collect()
         }
 
-        fn request_scan(&self, _options: HashMap<String, OwnedVariant>) {}
+        fn request_scan(&self, _options: HashMap<String, OwnedVariant>) {
+            let mut s = self.state.lock().unwrap();
+            s.calls.push(format!("RequestScan {}", self.path));
+        }
+    }
+
+    struct AccessPoint {
+        ssid: Vec<u8>,
+        strength: u8,
+        frequency: u32,
+        flags: u32,
+        wpa_flags: u32,
+        rsn_flags: u32,
+    }
+
+    #[interface(name = "org.freedesktop.NetworkManager.AccessPoint")]
+    impl AccessPoint {
+        #[zbus(property)]
+        fn ssid(&self) -> Vec<u8> {
+            self.ssid.clone()
+        }
+
+        #[zbus(property)]
+        fn strength(&self) -> u8 {
+            self.strength
+        }
+
+        #[zbus(property)]
+        fn flags(&self) -> u32 {
+            self.flags
+        }
+
+        #[zbus(property)]
+        fn wpa_flags(&self) -> u32 {
+            self.wpa_flags
+        }
+
+        #[zbus(property)]
+        fn rsn_flags(&self) -> u32 {
+            self.rsn_flags
+        }
+
+        #[zbus(property)]
+        fn frequency(&self) -> u32 {
+            self.frequency
+        }
+
+        #[zbus(property)]
+        fn hw_address(&self) -> String {
+            "02:00:00:00:00:01".into()
+        }
     }
 }

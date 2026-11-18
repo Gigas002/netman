@@ -129,6 +129,8 @@ pub enum WifiSecurity {
     Wpa,
     Wpa2,
     Wpa3,
+    /// Opportunistic Wireless Encryption ("Enhanced Open"): encrypted, no password.
+    Owe,
     Enterprise,
 }
 
@@ -140,12 +142,19 @@ impl WifiSecurity {
             Self::Wpa => "WPA",
             Self::Wpa2 => "WPA2",
             Self::Wpa3 => "WPA3",
+            Self::Owe => "OWE",
             Self::Enterprise => "802.1X",
         }
     }
 
+    /// Whether traffic is encrypted.
     pub fn is_secured(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Whether connecting asks for a password (OWE is encrypted but has none).
+    pub fn needs_password(self) -> bool {
+        matches!(self, Self::Wep | Self::Wpa | Self::Wpa2 | Self::Wpa3)
     }
 
     /// Security modes the connection editor allows cycling through.

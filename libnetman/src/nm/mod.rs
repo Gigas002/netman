@@ -30,7 +30,9 @@ use crate::{
     },
     error::Error,
 };
-use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile, profile_to_settings};
+use connection_settings::{
+    UPDATE2_TO_DISK, apply_profile, detect_wifi_security, parse_profile, profile_to_settings,
+};
 use proxies::{
     AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
     Ip6ConfigProxy, NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
@@ -579,7 +581,7 @@ impl NmClient {
             })
             .unwrap_or(WifiMode::Infrastructure);
 
-        let security = self.detect_wifi_security(raw);
+        let security = detect_wifi_security(raw);
 
         WifiInfo {
             ssid,
@@ -588,26 +590,6 @@ impl NmClient {
             frequency: None,
             bssid: None,
             mode,
-        }
-    }
-
-    fn detect_wifi_security(
-        &self,
-        raw: &HashMap<String, HashMap<String, OwnedVariant>>,
-    ) -> WifiSecurity {
-        if raw.get("802-1x").is_some() {
-            return WifiSecurity::Enterprise;
-        }
-        let key_mgmt = raw
-            .get("802-11-wireless-security")
-            .and_then(|s| get_str_value(s, "key-mgmt"));
-
-        match key_mgmt.as_deref() {
-            Some("wpa-psk") => WifiSecurity::Wpa2,
-            Some("sae") => WifiSecurity::Wpa3,
-            Some("wpa-eap") => WifiSecurity::Enterprise,
-            Some("none") | Some("ieee8021x") => WifiSecurity::Wep,
-            _ => WifiSecurity::None,
         }
     }
 
@@ -767,27 +749,35 @@ fn kind_order(kind: &ConnectionKind) -> u8 {
     }
 }
 
-/// Derive Wi-Fi security from NM access-point flag bitmasks.
+/// Derive Wi-Fi security from NM access-point flag bitmasks
+/// (`NM80211ApFlags` and `NM80211ApSecurityFlags`).
 pub(crate) fn security_from_ap(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
     const AP_FLAG_PRIVACY: u32 = 0x1;
-    const AP_SEC_PAIR_WPA: u32 = 0x1;
-    const AP_SEC_PAIR_RSN: u32 = 0x2;
     const AP_SEC_KEY_MGMT_PSK: u32 = 0x100;
     const AP_SEC_KEY_MGMT_802_1X: u32 = 0x200;
     const AP_SEC_KEY_MGMT_SAE: u32 = 0x400;
+    const AP_SEC_KEY_MGMT_OWE: u32 = 0x800;
+    const AP_SEC_KEY_MGMT_OWE_TM: u32 = 0x1000;
+    const AP_SEC_KEY_MGMT_EAP_SUITE_B_192: u32 = 0x2000;
 
     let sec = wpa_flags | rsn_flags;
+    // A WPA2/WPA3 transition network offers both PSK and SAE; a password
+    // profile (wpa-psk) works on it, as it does on WPA2.
+    if sec & AP_SEC_KEY_MGMT_PSK != 0 {
+        return if rsn_flags & AP_SEC_KEY_MGMT_PSK != 0 {
+            WifiSecurity::Wpa2
+        } else {
+            WifiSecurity::Wpa
+        };
+    }
     if sec & AP_SEC_KEY_MGMT_SAE != 0 {
         return WifiSecurity::Wpa3;
     }
-    if sec & AP_SEC_KEY_MGMT_802_1X != 0 {
+    if sec & (AP_SEC_KEY_MGMT_802_1X | AP_SEC_KEY_MGMT_EAP_SUITE_B_192) != 0 {
         return WifiSecurity::Enterprise;
     }
-    if sec & (AP_SEC_KEY_MGMT_PSK | AP_SEC_PAIR_RSN | AP_SEC_PAIR_WPA) != 0 {
-        return WifiSecurity::Wpa2;
-    }
-    if wpa_flags != 0 {
-        return WifiSecurity::Wpa;
+    if sec & (AP_SEC_KEY_MGMT_OWE | AP_SEC_KEY_MGMT_OWE_TM) != 0 {
+        return WifiSecurity::Owe;
     }
     if flags & AP_FLAG_PRIVACY != 0 {
         return WifiSecurity::Wep;

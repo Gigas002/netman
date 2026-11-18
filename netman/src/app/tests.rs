@@ -185,3 +185,69 @@ fn build_list_items_includes_mobile_section() {
             .any(|i| matches!(i, ListItem::Header(h) if h == "Mobile"))
     );
 }
+
+// ── App behavior ──────────────────────────────────────────────────────────────
+
+/// An `App` showing `connections`, as if NetworkManager had returned them.
+fn app_with(connections: Vec<Connection>) -> super::App {
+    super::App {
+        items: build_list_items(connections),
+        selected: 0,
+        show_detail: true,
+        nm_state: NmState::ConnectedGlobal,
+        networking_enabled: true,
+        wireless_enabled: true,
+        demo_mode: false,
+        show_help: false,
+        status_message: None,
+        password_prompt: None,
+        hidden_network_prompt: None,
+        connection_editor: None,
+        add_connection_menu: None,
+        vpn_add_menu: None,
+        vpn_import_prompt: None,
+        delete_confirm_prompt: None,
+        #[cfg(feature = "mobile")]
+        pin_unlock_prompt: None,
+        #[cfg(feature = "dbus")]
+        nm: None,
+        state_watcher: {
+            #[cfg(feature = "dbus")]
+            {
+                super::StateChangeWaiter::new(None)
+            }
+            #[cfg(not(feature = "dbus"))]
+            {
+                super::StateChangeWaiter::new()
+            }
+        },
+    }
+}
+
+fn visible(ssid: &str, strength: u8, security: WifiSecurity) -> Connection {
+    let mut c = wifi(ssid, strength, false);
+    c.uuid = format!("visible:{ssid}");
+    c.saved = false;
+    if let ConnectionKind::Wifi(w) = &mut c.kind {
+        w.security = security;
+    }
+    c
+}
+
+#[test]
+fn enter_on_an_owe_network_connects_without_a_password() {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = app_with(vec![visible("Enhanced-Open", 70, WifiSecurity::Owe)]);
+
+    let action = app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(app.password_prompt.is_none());
+    assert!(matches!(
+        action,
+        super::Action::ConnectUnsaved {
+            security: WifiSecurity::Owe,
+            password: None,
+            ..
+        }
+    ));
+}

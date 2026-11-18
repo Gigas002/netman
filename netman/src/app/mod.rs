@@ -1183,13 +1183,13 @@ impl App {
                 Some(Action::Continue)
             }
             KeyCode::Enter => {
-                if prompt.security.is_secured() && prompt.input.is_empty() {
+                if prompt.security.needs_password() && prompt.input.is_empty() {
                     prompt.error = Some("Password is required.".into());
                     return Some(Action::Continue);
                 }
                 let ssid = prompt.ssid.clone();
                 let security = prompt.security;
-                let password = if prompt.security.is_secured() {
+                let password = if prompt.security.needs_password() {
                     Some(prompt.input.text().to_owned())
                 } else {
                     None
@@ -1348,7 +1348,7 @@ impl App {
                 ));
                 return Action::Continue;
             }
-            if wifi.security.is_secured() {
+            if wifi.security.needs_password() {
                 self.password_prompt = Some(PasswordPrompt::new(wifi.ssid.clone(), wifi.security));
                 return Action::Continue;
             }

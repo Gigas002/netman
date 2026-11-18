@@ -255,3 +255,11 @@ fn merge_modem_live_data_updates_matching_device() {
     assert_eq!(m.signal_quality, 65);
     assert!(m.sim_locked);
 }
+
+#[test]
+fn owe_is_encrypted_without_a_password() {
+    assert!(WifiSecurity::Owe.is_secured());
+    assert!(!WifiSecurity::Owe.needs_password());
+    assert!(WifiSecurity::Wpa3.needs_password());
+    assert!(!WifiSecurity::None.needs_password());
+}

@@ -110,7 +110,7 @@ fn validate_new_profile(profile: &ConnectionProfile) -> Result<()> {
             if w.ssid.trim().is_empty() {
                 return Err(Error::OperationFailed("SSID must not be empty".into()));
             }
-            if w.security.is_secured() && w.psk.is_empty() {
+            if w.security.needs_password() && w.psk.is_empty() {
                 return Err(Error::OperationFailed(
                     "Password is required for secured networks".into(),
                 ));
@@ -275,7 +275,7 @@ fn apply_wifi(
             wifi.security.label()
         )));
     }
-    if for_new && wifi.security.is_secured() && wifi.psk.is_empty() {
+    if for_new && wifi.security.needs_password() && wifi.psk.is_empty() {
         return Err(Error::OperationFailed(
             "Password is required for secured networks".into(),
         ));
@@ -299,6 +299,11 @@ fn apply_wifi(
             .entry("802-11-wireless-security".into())
             .or_default();
         match wifi.security {
+            WifiSecurity::Owe => {
+                sec.insert("key-mgmt".into(), str_value("owe"));
+                sec.remove("auth-alg");
+                sec.remove("psk");
+            }
             WifiSecurity::Wpa3 => {
                 sec.insert("key-mgmt".into(), str_value("sae"));
             }
@@ -308,7 +313,7 @@ fn apply_wifi(
             }
             _ => {}
         }
-        if !wifi.psk.is_empty() {
+        if wifi.security.needs_password() && !wifi.psk.is_empty() {
             sec.insert("psk".into(), str_value(&wifi.psk));
         }
     } else {
@@ -619,7 +624,10 @@ fn apply_ip_profile(
     Ok(())
 }
 
-fn detect_wifi_security(raw: &HashMap<String, HashMap<String, OwnedVariant>>) -> WifiSecurity {
+/// Security mode of a saved Wi-Fi profile, from its `key-mgmt`.
+pub(crate) fn detect_wifi_security(
+    raw: &HashMap<String, HashMap<String, OwnedVariant>>,
+) -> WifiSecurity {
     if raw.get("802-1x").is_some() {
         return WifiSecurity::Enterprise;
     }
@@ -630,6 +638,7 @@ fn detect_wifi_security(raw: &HashMap<String, HashMap<String, OwnedVariant>>) ->
     match key_mgmt.as_deref() {
         Some("wpa-psk") => WifiSecurity::Wpa2,
         Some("sae") => WifiSecurity::Wpa3,
+        Some("owe") => WifiSecurity::Owe,
         Some("wpa-eap") => WifiSecurity::Enterprise,
         Some("none") | Some("ieee8021x") => WifiSecurity::Wep,
         _ => WifiSecurity::None,
