@@ -6,7 +6,7 @@ resolver = "3"
 edition = "2024"
 license = "GPL-3.0-only"
 keywords = ["tui", "networkmanager", "networking", "linux", "dbus"]
-repository = "https://github.com/netman-rs/netman"
+repository = "https://github.com/Gigas002/netman"
 version = "0.2.0"
 
 [workspace.dependencies]
