@@ -48,5 +48,8 @@ All notable changes to `netman` are documented here.
   text came in as key presses and a trailing newline submitted the form. It is
   enabled now, and line breaks in pasted text are dropped. The README no longer
   promises `Ctrl+V`, which most terminals don't send as a paste.
+- The help overlay was a fixed 20 rows for 27 lines, so the General section
+  (`q`, `Ctrl+C`) was never shown. It is now as tall as its content when the
+  terminal allows.
 
 ## [0.1.0] - 2026-09-04

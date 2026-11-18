@@ -26,3 +26,32 @@ fn strength_bar_boundaries() {
         assert_eq!(bar.chars().count(), 4, "bar must be 4 chars wide at {s}%");
     }
 }
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn help_overlay_shows_every_line_on_a_normal_terminal() {
+    let backend = ratatui::backend::TestBackend::new(80, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|frame| super::render_help_overlay(frame, frame.area()))
+        .unwrap();
+
+    // The last section was cut off by a fixed 20-row box.
+    let text = buffer_text(terminal.backend().buffer());
+    assert!(text.contains("Force quit"));
+}
+
+#[test]
+fn help_overlay_fits_a_tiny_terminal() {
+    for (w, h) in [(10, 3), (20, 10), (1, 1), (0, 0)] {
+        let backend = ratatui::backend::TestBackend::new(w, h);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_help_overlay(frame, frame.area()))
+            .unwrap();
+    }
+}
