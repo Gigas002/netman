@@ -57,11 +57,10 @@ pub fn resolve(cli: CliOptions, file: Option<FileConfig>) -> Settings {
 
     let log_file = cli.log_file.or(file.log.file);
 
-    let tick_rate = if cli.tick_rate != 1000 {
-        cli.tick_rate
-    } else {
-        file.ui.tick_rate.unwrap_or(defaults.tick_rate)
-    };
+    let tick_rate = cli
+        .tick_rate
+        .or(file.ui.tick_rate)
+        .unwrap_or(defaults.tick_rate);
 
     let show_detail = file.ui.show_detail.unwrap_or(defaults.show_detail);
     let auto_scan = file.network.auto_scan.unwrap_or(defaults.auto_scan);

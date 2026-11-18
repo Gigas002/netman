@@ -26,9 +26,10 @@ pub struct CliOptions {
     #[arg(long, value_name = "FILE")]
     pub log_file: Option<std::path::PathBuf>,
 
-    /// Tick rate in milliseconds — how often the UI polls for NM state changes.
-    #[arg(long, default_value_t = 1000, value_name = "MS")]
-    pub tick_rate: u64,
+    /// Tick rate in milliseconds — how often the UI polls for NM state changes
+    /// [default: `[ui] tick_rate` from the config file, else 1000].
+    #[arg(long, value_name = "MS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub tick_rate: Option<u64>,
 }
 
 /// Parse `argv` using clap and return the structured options.

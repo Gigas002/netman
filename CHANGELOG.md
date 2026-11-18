@@ -35,5 +35,8 @@ All notable changes to `netman` are documented here.
 - `[network] auto_scan` and `scan_interval` were read but never used; netman
   now asks NM for a scan every `scan_interval` seconds (30 by default) while
   Wi-Fi is on.
+- `--tick-rate 1000` did not override `[ui] tick_rate` from the config file
+  (1000 was taken to mean "not given"). A tick rate of 0 crashed netman and
+  left the terminal in raw mode; it is now rejected with an error.
 
 ## [0.1.0] - 2026-09-04

@@ -72,3 +72,14 @@ fn load_rejects_unknown_fields() {
     let result = load(Some(f.path()));
     assert!(result.is_err());
 }
+
+#[test]
+fn load_rejects_zero_tick_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[ui]\ntick_rate = 0\n").unwrap();
+
+    let err = load(Some(&path)).unwrap_err();
+
+    assert!(format!("{err:#}").contains("tick_rate must be at least 1"));
+}
