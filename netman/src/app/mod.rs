@@ -1701,8 +1701,14 @@ impl App {
     }
 
     fn open_vpn_add_menu(&mut self) {
-        let mut plugins = libnetman::vpn_plugins::list_installed_plugins();
-        if plugins.is_empty() {
+        self.open_vpn_add_menu_with(libnetman::vpn_plugins::list_installed_plugins());
+    }
+
+    /// Open the VPN menu for `plugins`, the installed NM VPN plugins. Only
+    /// demo mode fills an empty list with a sample entry: outside it, a
+    /// plugin that isn't installed can't create a working connection.
+    fn open_vpn_add_menu_with(&mut self, mut plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>) {
+        if plugins.is_empty() && self.demo_mode {
             plugins = demo_vpn_plugins();
         }
         if plugins.is_empty() {

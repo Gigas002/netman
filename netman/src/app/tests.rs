@@ -361,3 +361,27 @@ fn pasted_text_loses_newlines_and_control_characters() {
         "hunter2"
     );
 }
+
+#[test]
+fn vpn_menu_without_plugins_says_so() {
+    let mut app = app_with(vec![]);
+    app.demo_mode = false;
+
+    app.open_vpn_add_menu_with(Vec::new());
+
+    assert!(app.vpn_add_menu.is_none());
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("No VPN plugins installed.")
+    );
+}
+
+#[test]
+fn vpn_menu_in_demo_mode_offers_a_sample_plugin() {
+    let mut app = app_with(vec![]);
+    app.demo_mode = true;
+
+    app.open_vpn_add_menu_with(Vec::new());
+
+    assert_eq!(app.vpn_add_menu.unwrap().plugins.len(), 1);
+}

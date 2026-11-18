@@ -51,5 +51,8 @@ All notable changes to `netman` are documented here.
 - The help overlay was a fixed 20 rows for 27 lines, so the General section
   (`q`, `Ctrl+C`) was never shown. It is now as tall as its content when the
   terminal allows.
+- With no NetworkManager VPN plugin installed, the "add VPN" menu offered a
+  sample OpenVPN entry (meant for demo mode), and the connection it created
+  could not work. It now says "No VPN plugins installed.".
 
 ## [0.1.0] - 2026-09-04
