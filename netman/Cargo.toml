@@ -3,7 +3,6 @@ name = "netman"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 description = "TUI applet analogue of network-manager-applet"
 keywords.workspace = true
 repository.workspace = true
