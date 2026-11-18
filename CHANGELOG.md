@@ -63,5 +63,10 @@ All notable changes to `netman` are documented here.
 - With no NetworkManager VPN plugin installed, the "add VPN" menu offered a
   sample OpenVPN entry (meant for demo mode), and the connection it created
   could not work. It now says "No VPN plugins installed.".
+- The hidden-network prompt could only create WPA2 (or, with an empty password,
+  open) profiles, so WPA3-only and Enhanced Open (OWE) hidden networks could
+  not be joined from it. It now has a Security choice (←/→: WPA2, WPA3, Open,
+  OWE); an empty password with WPA2 or WPA3 is an error instead of silently
+  making an open profile.
 
 ## [0.1.0] - 2026-09-04

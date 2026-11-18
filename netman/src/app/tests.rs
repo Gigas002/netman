@@ -3,7 +3,9 @@ use libnetman::connection::{
     Ipv6Profile, NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
 };
 
-use super::{EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status};
+use super::{
+    Action, App, EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status,
+};
 
 fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
     Connection {
@@ -384,4 +386,112 @@ fn vpn_menu_in_demo_mode_offers_a_sample_plugin() {
     app.open_vpn_add_menu_with(Vec::new());
 
     assert_eq!(app.vpn_add_menu.unwrap().plugins.len(), 1);
+}
+
+fn hidden_prompt_app() -> App {
+    let mut app = app_with(vec![]);
+    app.hidden_network_prompt = Some(crate::app::HiddenNetworkPrompt::new());
+    app
+}
+
+fn type_text(app: &mut App, text: &str) {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    for c in text.chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+    }
+}
+
+fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) -> Action {
+    app.handle_key(code, ratatui::crossterm::event::KeyModifiers::NONE)
+}
+
+#[test]
+fn hidden_network_defaults_to_wpa2_with_a_password() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab); // security
+    press(&mut app, KeyCode::Tab); // password
+    type_text(&mut app, "hunter22");
+
+    match press(&mut app, KeyCode::Enter) {
+        Action::ConnectUnsaved {
+            ssid,
+            security,
+            password,
+            hidden,
+        } => {
+            assert_eq!(ssid, "Attic");
+            assert_eq!(security, WifiSecurity::Wpa2);
+            assert_eq!(password.as_deref(), Some("hunter22"));
+            assert!(hidden);
+        }
+        _ => panic!("expected a connect action"),
+    }
+}
+
+#[test]
+fn hidden_network_can_be_wpa3_only() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Right); // WPA3
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "hunter22");
+
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        Action::ConnectUnsaved {
+            security: WifiSecurity::Wpa3,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hidden_owe_network_skips_the_password() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Left); // wraps to OWE
+    assert_eq!(
+        app.hidden_network_prompt.as_ref().unwrap().security,
+        WifiSecurity::Owe
+    );
+    // Tab goes back to the SSID: there is no password field to visit.
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        app.hidden_network_prompt.as_ref().unwrap().focused,
+        crate::app::HiddenPromptField::Ssid
+    );
+
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        Action::ConnectUnsaved {
+            security: WifiSecurity::Owe,
+            password: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hidden_wpa2_without_a_password_is_refused() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+
+    assert!(matches!(press(&mut app, KeyCode::Enter), Action::Continue));
+
+    let prompt = app.hidden_network_prompt.as_ref().unwrap();
+    assert!(
+        prompt
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("needs a password")
+    );
+    assert_eq!(prompt.focused, crate::app::HiddenPromptField::Password);
 }

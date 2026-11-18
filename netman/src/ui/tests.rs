@@ -55,3 +55,29 @@ fn help_overlay_fits_a_tiny_terminal() {
             .unwrap();
     }
 }
+
+fn draw_hidden_prompt(prompt: &crate::app::HiddenNetworkPrompt) -> String {
+    let backend = ratatui::backend::TestBackend::new(80, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| super::hidden_network_prompt::render(frame, frame.area(), prompt))
+        .unwrap();
+    buffer_text(terminal.backend().buffer())
+}
+
+#[test]
+fn hidden_prompt_shows_security_and_every_line() {
+    let mut prompt = crate::app::HiddenNetworkPrompt::new();
+    prompt.error = Some("WPA2 needs a password".into());
+    let text = draw_hidden_prompt(&prompt);
+    assert!(text.contains("Security"));
+    assert!(text.contains("WPA2"));
+    assert!(text.contains("Password"));
+    // The last hint line fits inside the box with an error showing.
+    assert!(text.contains("show/hide password"));
+
+    prompt.security = WifiSecurity::Owe;
+    let text = draw_hidden_prompt(&prompt);
+    assert!(text.contains("OWE"));
+    assert!(text.contains("No password"));
+}

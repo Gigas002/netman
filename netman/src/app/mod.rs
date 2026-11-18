@@ -283,12 +283,24 @@ impl PinUnlockPrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiddenPromptField {
     Ssid,
+    Security,
     Password,
 }
+
+/// Security choices for a hidden network, in the order ←/→ cycles them.
+/// WEP and 802.1X can't be set up from the prompt (see
+/// `wifi_connection_settings`).
+pub const HIDDEN_SECURITY_CHOICES: [WifiSecurity; 4] = [
+    WifiSecurity::Wpa2,
+    WifiSecurity::Wpa3,
+    WifiSecurity::None,
+    WifiSecurity::Owe,
+];
 
 /// State for the hidden Wi-Fi connection modal.
 pub struct HiddenNetworkPrompt {
     pub ssid: TextInput,
+    pub security: WifiSecurity,
     pub password: TextInput,
     pub focused: HiddenPromptField,
     pub show_password: bool,
@@ -305,6 +317,7 @@ impl HiddenNetworkPrompt {
     pub fn new() -> Self {
         Self {
             ssid: TextInput::new(),
+            security: HIDDEN_SECURITY_CHOICES[0],
             password: TextInput::new(),
             focused: HiddenPromptField::Ssid,
             show_password: false,
@@ -312,18 +325,48 @@ impl HiddenNetworkPrompt {
         }
     }
 
-    fn focused_input_mut(&mut self) -> &mut TextInput {
+    /// The text field with focus; none while the security choice has it.
+    fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
         match self.focused {
-            HiddenPromptField::Ssid => &mut self.ssid,
-            HiddenPromptField::Password => &mut self.password,
+            HiddenPromptField::Ssid => Some(&mut self.ssid),
+            HiddenPromptField::Security => None,
+            HiddenPromptField::Password => Some(&mut self.password),
         }
     }
 
-    fn next_field(&mut self) {
-        self.focused = match self.focused {
-            HiddenPromptField::Ssid => HiddenPromptField::Password,
-            HiddenPromptField::Password => HiddenPromptField::Ssid,
+    /// The fields Tab moves through: no password for open and OWE networks.
+    fn fields(&self) -> &'static [HiddenPromptField] {
+        use HiddenPromptField::*;
+        if self.security.needs_password() {
+            &[Ssid, Security, Password]
+        } else {
+            &[Ssid, Security]
+        }
+    }
+
+    fn move_field(&mut self, forward: bool) {
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.focused).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % fields.len()
+        } else {
+            (at + fields.len() - 1) % fields.len()
         };
+        self.focused = fields[next];
+    }
+
+    fn cycle_security(&mut self, forward: bool) {
+        let choices = HIDDEN_SECURITY_CHOICES;
+        let at = choices
+            .iter()
+            .position(|s| *s == self.security)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % choices.len()
+        } else {
+            (at + choices.len() - 1) % choices.len()
+        };
+        self.security = choices[next];
     }
 }
 
@@ -1278,7 +1321,12 @@ impl App {
                 Some(Action::Continue)
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                prompt.next_field();
+                prompt.move_field(code == KeyCode::Tab);
+                Some(Action::Continue)
+            }
+            KeyCode::Left | KeyCode::Right if prompt.focused == HiddenPromptField::Security => {
+                prompt.cycle_security(code == KeyCode::Right);
+                prompt.error = None;
                 Some(Action::Continue)
             }
             KeyCode::Enter => {
@@ -1288,20 +1336,25 @@ impl App {
                     prompt.focused = HiddenPromptField::Ssid;
                     return Some(Action::Continue);
                 }
-                let password = prompt.password.text().to_owned();
-                let security = if password.is_empty() {
-                    WifiSecurity::None
+                let security = prompt.security;
+                let password = if security.needs_password() {
+                    let password = prompt.password.text().to_owned();
+                    if password.is_empty() {
+                        prompt.error = Some(format!(
+                            "{} needs a password; ←/→ on Security for Open or OWE.",
+                            security.label()
+                        ));
+                        prompt.focused = HiddenPromptField::Password;
+                        return Some(Action::Continue);
+                    }
+                    Some(password)
                 } else {
-                    WifiSecurity::Wpa2
+                    None
                 };
                 Some(Action::ConnectUnsaved {
                     ssid,
                     security,
-                    password: if password.is_empty() {
-                        None
-                    } else {
-                        Some(password)
-                    },
+                    password,
                     hidden: true,
                 })
             }
@@ -1312,7 +1365,9 @@ impl App {
                 Some(Action::Continue)
             }
             _ => {
-                if prompt.focused_input_mut().handle_key(code, modifiers) {
+                if let Some(input) = prompt.focused_input_mut()
+                    && input.handle_key(code, modifiers)
+                {
                     prompt.error = None;
                 }
                 Some(Action::Continue)
@@ -1406,8 +1461,10 @@ impl App {
             return;
         }
         if let Some(prompt) = &mut self.hidden_network_prompt {
-            prompt.focused_input_mut().insert_str(text);
-            prompt.error = None;
+            if let Some(input) = prompt.focused_input_mut() {
+                input.insert_str(text);
+                prompt.error = None;
+            }
             return;
         }
         if let Some(prompt) = &mut self.password_prompt {
