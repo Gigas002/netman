@@ -113,7 +113,7 @@ mock's, and the call counts are what transfers); the `mobile` path's cost
 | Logging advice | `examples/netman.toml` says logs are dropped while the TUI is up, and to set `file` to keep them. | Fixed, docs (90c269c) |
 | `--help` | `--tick-rate` says where its default comes from. | Fixed (5da48a4) |
 | `list_height` | Documented as unused; it is read and ignored. | Accepted |
-| Hidden networks | The hidden-network prompt always creates a WPA2-PSK profile. Open, WPA3 and OWE hidden networks need the editor afterwards. | Accepted, low, §7 |
+| Hidden networks | The prompt made WPA2-PSK profiles, or open ones when the password was left empty, so WPA3-only and OWE hidden networks couldn't be joined from it. It has a Security choice now, and an empty password for WPA2/WPA3 is an error rather than an open profile. | Fixed, low (51336a0) |
 
 ## 6. Code quality, tests and hygiene
 
@@ -123,7 +123,7 @@ mock's, and the call counts are what transfers); the `mobile` path's cost
 | Coverage | 20.06 % → 36.86 % of lines (`cargo llvm-cov --workspace --all-features`). `nm/mod.rs`: 2.9 → 72.4 %. `app/mod.rs` (18.6 %) is mostly async handlers that need a client, and `ui/` mostly drawing. | Fixed, partly; §7 |
 | Duplicated logic | `detect_wifi_security` existed twice, with different results for OWE. | Fixed (0ff01e0) |
 | Cargo warnings | Every build printed three manifest warnings: `homepage` repeating `repository`, an unused workspace `description`, and `tracing` unused without `dbus`. | Fixed (b3ff7ef) |
-| Repository URL | `repository` in the manifests pointed at `github.com/netman-rs/netman`, which doesn't exist; it is `github.com/Gigas002/netman` now. | Fixed |
+| Repository URL | `repository` in the manifests pointed at `github.com/netman-rs/netman`, which doesn't exist; it is `github.com/Gigas002/netman` now. | Fixed (43f4799) |
 | Flaky tests | The new tests don't wait on wall-clock time: the scan test uses tokio's paused clock, and the call log waits on a marker call. The suites passed 30 parallel runs each. | OK |
 | Gates | fmt, typos, deny, clippy and tests at the three feature levels, and docs, pass on every commit. | OK |
 
@@ -137,8 +137,6 @@ mock's, and the call counts are what transfers); the `mobile` path's cost
 - **Non-UTF-8 SSIDs.** An access point whose SSID isn't UTF-8 is skipped
   (`String::from_utf8` fails), so it can't be joined from netman. Showing it
   lossily needs a byte-SSID path through `WifiInfo` and the profile builders.
-- **Hidden network security.** The prompt could offer a security choice
-  instead of always using WPA2-PSK.
 - **App coverage.** The async `App` handlers could run against the p2p fake,
   the way the library tests do, which would cover most of `app/mod.rs`.
 
