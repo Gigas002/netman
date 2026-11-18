@@ -346,3 +346,18 @@ fn auto_scan_timer_follows_settings() {
     settings.auto_scan = false;
     assert!(super::auto_scan_timer(&settings).is_none());
 }
+
+#[test]
+fn pasted_text_loses_newlines_and_control_characters() {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = app_with(vec![visible("Cafe", 70, WifiSecurity::Wpa2)]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.password_prompt.is_some());
+
+    app.handle_paste("hunter2\r\n");
+
+    assert_eq!(
+        app.password_prompt.as_ref().unwrap().input.text(),
+        "hunter2"
+    );
+}

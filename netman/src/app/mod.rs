@@ -92,7 +92,13 @@ impl TerminalGuard {
         // The guard exists from here on: a failure below restores raw mode too.
         let mut guard = Self(terminal);
         crate::logger::set_terminal_in_use(true);
-        execute!(guard.backend_mut(), EnterAlternateScreen)?;
+        // Bracketed paste: a paste arrives as one Event::Paste instead of
+        // key presses, where a newline would act as Enter.
+        execute!(
+            guard.backend_mut(),
+            EnterAlternateScreen,
+            ratatui::crossterm::event::EnableBracketedPaste
+        )?;
         guard.hide_cursor()?;
         Ok(guard)
     }
@@ -123,6 +129,7 @@ impl Drop for TerminalGuard {
 fn restore_terminal() {
     let _ = execute!(
         std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste,
         LeaveAlternateScreen,
         ratatui::crossterm::cursor::Show
     );
@@ -1382,6 +1389,10 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        // Every input is one line: a copied password or path often ends in
+        // a newline, which would otherwise become part of it.
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        let text = text.as_str();
         if let Some(prompt) = &mut self.vpn_import_prompt {
             prompt.path.insert_str(text);
             prompt.error = None;

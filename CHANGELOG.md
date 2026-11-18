@@ -44,5 +44,9 @@ All notable changes to `netman` are documented here.
 - Without `--log-file`, warnings (for example "refresh failed" every second
   while NM restarts) were written to stderr over the TUI. They are now
   dropped while the TUI is on screen; use `--log-file` to keep them.
+- Pasting never arrived as a paste: bracketed paste was not enabled, so pasted
+  text came in as key presses and a trailing newline submitted the form. It is
+  enabled now, and line breaks in pasted text are dropped. The README no longer
+  promises `Ctrl+V`, which most terminals don't send as a paste.
 
 ## [0.1.0] - 2026-09-04
