@@ -32,13 +32,7 @@ use crate::{settings::Settings, ui};
 pub async fn run(settings: Settings) -> Result<()> {
     let mut app = App::new(&settings).await;
 
-    // Terminal setup.
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
+    let mut terminal = TerminalGuard::enter()?;
 
     info!("netman started");
 
@@ -50,7 +44,7 @@ pub async fn run(settings: Settings) -> Result<()> {
 
     // Draw once per wake-up: a key, a refresh tick, or an NM state change.
     // Between them the loop sleeps; nothing on screen can change.
-    let result = loop {
+    loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
         tokio::select! {
@@ -81,14 +75,70 @@ pub async fn run(settings: Settings) -> Result<()> {
                 None => break Err(anyhow::anyhow!("terminal input closed")),
             },
         }
-    };
+    }
+}
 
-    // Terminal restore.
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+/// The terminal in TUI mode: raw input and the alternate screen.
+///
+/// Dropping the guard restores the terminal, so every way out of `run` does,
+/// errors included; the panic hook does the same on a panic.
+struct TerminalGuard(Terminal<CrosstermBackend<std::io::Stdout>>);
 
-    result
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        install_panic_hook();
+        let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        enable_raw_mode()?;
+        // The guard exists from here on: a failure below restores raw mode too.
+        let mut guard = Self(terminal);
+        execute!(guard.backend_mut(), EnterAlternateScreen)?;
+        guard.hide_cursor()?;
+        Ok(guard)
+    }
+}
+
+impl std::ops::Deref for TerminalGuard {
+    type Target = Terminal<CrosstermBackend<std::io::Stdout>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TerminalGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Leave the alternate screen, show the cursor and turn raw mode off.
+/// Safe to call when the terminal is already restored.
+fn restore_terminal() {
+    let _ = execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        ratatui::crossterm::cursor::Show
+    );
+    let _ = disable_raw_mode();
+}
+
+/// Restore the terminal before the panic message is printed, so the message
+/// is readable and the shell isn't left in raw mode.
+fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            previous(info);
+        }));
+    });
 }
 
 /// The `[network] auto_scan` timer: every `scan_interval` seconds, starting

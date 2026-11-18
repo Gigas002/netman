@@ -38,5 +38,8 @@ All notable changes to `netman` are documented here.
 - `--tick-rate 1000` did not override `[ui] tick_rate` from the config file
   (1000 was taken to mean "not given"). A tick rate of 0 crashed netman and
   left the terminal in raw mode; it is now rejected with an error.
+- A panic, or an error while drawing, left the terminal in raw mode on the
+  alternate screen. The terminal is now restored on every exit path, and
+  before a panic message is printed.
 
 ## [0.1.0] - 2026-09-04
