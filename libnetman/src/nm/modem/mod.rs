@@ -90,18 +90,12 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
             continue;
         }
 
-        let modem = DeviceModemProxy::builder(conn)
-            .path(path.as_str())
-            .build()
-            .await?;
-
-        let device_id = modem.device_id().await.unwrap_or_default();
-        if device_id.is_empty() {
+        let Some(mm_path) = mm_modem_path(&dev).await else {
             continue;
-        }
+        };
 
         let mm = MmModemProxy::builder(conn)
-            .path(device_id.as_str())
+            .path(mm_path.as_str())
             .build()
             .await?;
 
@@ -145,15 +139,15 @@ async fn build_modem_live_data(
     let apn = modem.apn().await.ok().filter(|a| !a.is_empty());
     let current_caps = modem.current_capabilities().await.unwrap_or(0);
 
-    let device_id = modem.device_id().await.unwrap_or_default();
+    let mm_path = mm_modem_path(&dev).await;
     let mut signal_quality = 0u8;
     let mut access_technology = caps_to_access_technology(current_caps);
     let mut operator_name = None;
     let mut sim_locked = false;
 
-    if !device_id.is_empty()
+    if let Some(mm_path) = &mm_path
         && let Ok(mm) = MmModemProxy::builder(conn)
-            .path(device_id.as_str())
+            .path(mm_path.as_str())
             .build()
             .await
     {
@@ -168,7 +162,7 @@ async fn build_modem_live_data(
         }
 
         if let Ok(mm3gpp) = MmModem3gppProxy::builder(conn)
-            .path(device_id.as_str())
+            .path(mm_path.as_str())
             .build()
             .await
         {
@@ -185,6 +179,16 @@ async fn build_modem_live_data(
         access_technology,
         sim_locked,
     }))
+}
+
+/// The ModemManager object behind an NM modem device: the device's `Udi`.
+async fn mm_modem_path(dev: &DeviceProxy<'_>) -> Option<String> {
+    let udi = dev.udi().await.ok()?;
+    is_mm_modem_path(&udi).then_some(udi)
+}
+
+fn is_mm_modem_path(udi: &str) -> bool {
+    udi.starts_with("/org/freedesktop/ModemManager1/Modem/")
 }
 
 fn caps_to_access_technology(caps: u32) -> AccessTechnology {

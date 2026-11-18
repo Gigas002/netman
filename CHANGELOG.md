@@ -22,5 +22,9 @@ All notable changes to `netman` are documented here.
   frequency was labelled "2.4 GHz" with "0 MHz" in the detail panel.
 - The detail panel never showed IPv6 DNS servers: they were read from
   `NameserverData`, which only IPv4 configs have.
+- Mobile broadband (`mobile` feature): signal, technology, operator and SIM
+  lock state were never shown, and SIM PIN unlock always failed. The
+  ModemManager object was looked up by NM's `DeviceId`, an opaque hash, instead
+  of the device's `Udi`.
 
 ## [0.1.0] - 2026-09-04

@@ -161,6 +161,11 @@ pub trait Device {
     /// Current device state (NMDeviceState as u32).
     #[zbus(property)]
     fn state(&self) -> zbus::Result<u32>;
+
+    /// Identifier of the backing service's object; for a modem, its
+    /// ModemManager object path.
+    #[zbus(property)]
+    fn udi(&self) -> zbus::Result<String>;
 }
 
 // ── org.freedesktop.NetworkManager.Device.Wireless ───────────────────────────
@@ -269,7 +274,8 @@ pub trait DeviceModem {
     #[zbus(property)]
     fn current_capabilities(&self) -> zbus::Result<u32>;
 
-    /// ModemManager device ID (object path since NM 1.20).
+    /// ModemManager's opaque device identifier (not an object path; the
+    /// ModemManager object is the device's `Udi`).
     #[zbus(property)]
     fn device_id(&self) -> zbus::Result<String>;
 

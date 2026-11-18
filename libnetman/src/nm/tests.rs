@@ -261,6 +261,39 @@ async fn active_connection_reports_ipv4_and_ipv6_dns() {
     assert_eq!(ip6.nameservers, ["2001:4860:4860::8888"]);
 }
 
+#[cfg(feature = "mobile")]
+#[tokio::test]
+async fn modem_data_comes_from_the_modemmanager_object_named_by_udi() {
+    let (fake, nm) = FakeNm::start().await;
+    fake.add_modem("wwan0", "/org/freedesktop/ModemManager1/Modem/0", false)
+        .await;
+
+    let live = super::modem::fetch_modem_live_data(&nm.conn).await;
+
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].interface, "wwan0");
+    assert_eq!(live[0].signal_quality, 77);
+    assert_eq!(live[0].operator_name.as_deref(), Some("Fake Mobile"));
+    assert_eq!(
+        live[0].access_technology,
+        crate::connection::AccessTechnology::Lte
+    );
+}
+
+#[cfg(feature = "mobile")]
+#[tokio::test]
+async fn sim_pin_reaches_the_locked_modem() {
+    let (fake, nm) = FakeNm::start().await;
+    fake.add_modem("wwan0", "/org/freedesktop/ModemManager1/Modem/0", true)
+        .await;
+
+    let live = super::modem::fetch_modem_live_data(&nm.conn).await;
+    assert!(live[0].sim_locked);
+    nm.send_sim_pin("1234").await.expect("send PIN");
+
+    assert_eq!(fake.calls_to("SendPin"), ["SendPin 1234"]);
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
@@ -376,6 +409,7 @@ mod fake {
                     Device {
                         interface: iface.into(),
                         device_type: 2,
+                        udi: format!("/sys/devices/virtual/net/{iface}"),
                     },
                 )
                 .await
@@ -417,6 +451,53 @@ mod fake {
                 .unwrap()
                 .ip_configs
                 .insert(uuid.to_owned(), (p4, p6));
+        }
+
+        /// A modem device whose `Udi` is `mm_path`, and the ModemManager
+        /// objects behind it. `DeviceId` is an opaque hash, as in NM.
+        #[cfg(feature = "mobile")]
+        pub async fn add_modem(&self, iface: &str, mm_path: &str, sim_locked: bool) {
+            let p = self
+                .state
+                .lock()
+                .unwrap()
+                .next_path(&format!("{NM_PATH}/Devices"));
+            let sim_path = format!("/org/freedesktop/ModemManager1/SIM/{}", p.as_str().len());
+            let server = self.server.object_server();
+            server
+                .at(
+                    &p,
+                    Device {
+                        interface: iface.into(),
+                        device_type: 8,
+                        udi: mm_path.into(),
+                    },
+                )
+                .await
+                .expect("serve Device");
+            server
+                .at(&p, mobile::DeviceModem)
+                .await
+                .expect("serve Modem");
+            server
+                .at(
+                    mm_path,
+                    mobile::MmModem {
+                        locked: sim_locked,
+                        sim: path(&sim_path),
+                    },
+                )
+                .await
+                .expect("serve MM Modem");
+            server
+                .at(mm_path, mobile::MmModem3gpp)
+                .await
+                .expect("serve MM 3GPP");
+            server
+                .at(sim_path.as_str(), mobile::MmSim(self.state.clone()))
+                .await
+                .expect("serve MM SIM");
+            self.state.lock().unwrap().devices.push(p);
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -740,6 +821,7 @@ mod fake {
     struct Device {
         interface: String,
         device_type: u32,
+        udi: String,
     }
 
     #[interface(name = "org.freedesktop.NetworkManager.Device")]
@@ -757,6 +839,11 @@ mod fake {
         #[zbus(property)]
         fn state(&self) -> u32 {
             100
+        }
+
+        #[zbus(property)]
+        fn udi(&self) -> String {
+            self.udi.clone()
         }
     }
 
@@ -894,6 +981,91 @@ mod fake {
                     std::net::IpAddr::V4(_) => None,
                 })
                 .collect()
+        }
+    }
+
+    #[cfg(feature = "mobile")]
+    mod mobile {
+        use zbus::{OwnedObjectPath, interface};
+
+        use super::Shared;
+
+        pub struct DeviceModem;
+
+        #[interface(name = "org.freedesktop.NetworkManager.Device.Modem")]
+        impl DeviceModem {
+            #[zbus(property)]
+            fn modem_capabilities(&self) -> u32 {
+                0x4
+            }
+
+            #[zbus(property)]
+            fn current_capabilities(&self) -> u32 {
+                0x4
+            }
+
+            /// ModemManager's `DeviceIdentifier`: a hash, not an object path.
+            #[zbus(property)]
+            fn device_id(&self) -> String {
+                "3f6c1e2a9b0d4c5e8f7a6b5c4d3e2f1a0b9c8d7e".into()
+            }
+
+            #[zbus(property)]
+            fn operator_code(&self) -> String {
+                "00101".into()
+            }
+
+            #[zbus(property)]
+            fn apn(&self) -> String {
+                "internet".into()
+            }
+        }
+
+        pub struct MmModem {
+            pub locked: bool,
+            pub sim: OwnedObjectPath,
+        }
+
+        #[interface(name = "org.freedesktop.ModemManager1.Modem")]
+        impl MmModem {
+            #[zbus(property)]
+            fn signal_quality(&self) -> (u32, bool) {
+                (77, true)
+            }
+
+            #[zbus(property)]
+            fn unlock_required(&self) -> u32 {
+                if self.locked { 2 } else { 1 }
+            }
+
+            #[zbus(property)]
+            fn sim(&self) -> OwnedObjectPath {
+                self.sim.clone()
+            }
+
+            #[zbus(property)]
+            fn access_technologies(&self) -> u32 {
+                0x800
+            }
+        }
+
+        pub struct MmModem3gpp;
+
+        #[interface(name = "org.freedesktop.ModemManager1.Modem.Modem3gpp")]
+        impl MmModem3gpp {
+            #[zbus(property)]
+            fn operator_name(&self) -> String {
+                "Fake Mobile".into()
+            }
+        }
+
+        pub struct MmSim(pub Shared);
+
+        #[interface(name = "org.freedesktop.ModemManager1.Sim")]
+        impl MmSim {
+            fn send_pin(&self, pin: &str) {
+                self.0.lock().unwrap().calls.push(format!("SendPin {pin}"));
+            }
         }
     }
 }
