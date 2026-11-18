@@ -114,10 +114,15 @@ impl WifiInfo {
         format!("{filled}{empty}")
     }
 
-    /// Frequency band label: "2.4 GHz" or "5 GHz".
+    /// Frequency band label: "2.4 GHz", "5 GHz", "6 GHz" or "60 GHz".
     pub fn band_label(&self) -> Option<&'static str> {
-        self.frequency
-            .map(|f| if f < 3000 { "2.4 GHz" } else { "5 GHz" })
+        match self.frequency? {
+            2400..=2500 => Some("2.4 GHz"),
+            4900..=5924 => Some("5 GHz"),
+            5925..=7125 => Some("6 GHz"),
+            57000..=71000 => Some("60 GHz"),
+            _ => None,
+        }
     }
 }
 

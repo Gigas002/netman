@@ -646,8 +646,8 @@ impl NmClient {
             ssid,
             strength: ap.strength().await.unwrap_or(0),
             security: security_from_ap(flags, wpa_flags, rsn_flags),
-            frequency: Some(ap.frequency().await.unwrap_or(0)),
-            bssid: Some(ap.hw_address().await.unwrap_or_default()),
+            frequency: ap.frequency().await.ok().filter(|f| *f != 0),
+            bssid: ap.hw_address().await.ok().filter(|b| !b.is_empty()),
             mode: WifiMode::Infrastructure,
         })
     }

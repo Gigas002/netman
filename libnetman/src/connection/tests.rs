@@ -257,6 +257,29 @@ fn merge_modem_live_data_updates_matching_device() {
 }
 
 #[test]
+fn band_label_covers_6ghz_and_unknown() {
+    let band = |mhz| {
+        WifiInfo {
+            ssid: "x".into(),
+            strength: 50,
+            security: WifiSecurity::Wpa2,
+            frequency: Some(mhz),
+            bssid: None,
+            mode: WifiMode::Infrastructure,
+        }
+        .band_label()
+    };
+    assert_eq!(band(2412), Some("2.4 GHz"));
+    assert_eq!(band(5180), Some("5 GHz"));
+    assert_eq!(band(5885), Some("5 GHz"));
+    assert_eq!(band(5955), Some("6 GHz"));
+    assert_eq!(band(7115), Some("6 GHz"));
+    assert_eq!(band(58320), Some("60 GHz"));
+    // NM reports 0 when it doesn't know the frequency.
+    assert_eq!(band(0), None);
+}
+
+#[test]
 fn owe_is_encrypted_without_a_password() {
     assert!(WifiSecurity::Owe.is_secured());
     assert!(!WifiSecurity::Owe.needs_password());
