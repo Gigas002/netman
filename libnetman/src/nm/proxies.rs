@@ -180,6 +180,10 @@ pub trait DeviceWireless {
 
     /// All access points visible to this device.
     fn get_all_access_points(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+
+    /// CLOCK_BOOTTIME milliseconds of the last finished scan; -1 if never.
+    #[zbus(property)]
+    fn last_scan(&self) -> zbus::Result<i64>;
 }
 
 // ── org.freedesktop.NetworkManager.AccessPoint ───────────────────────────────

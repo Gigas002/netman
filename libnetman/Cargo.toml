@@ -27,4 +27,4 @@ uuid = { workspace = true, optional = true }
 tempfile = "3"
 # An in-process NetworkManager double served over a peer-to-peer socket.
 zbus = { workspace = true, features = ["p2p", "service"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

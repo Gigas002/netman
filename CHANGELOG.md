@@ -29,5 +29,8 @@ All notable changes to `netman` are documented here.
 - The selection kept its position while each refresh re-sorted Wi-Fi networks
   by signal, so Enter, `d`, `D` or `e` could act on a different network than
   the highlighted one a moment earlier. It now stays on the same connection.
+- Scanning (`r` / `F5`) froze the UI for two seconds. The scan now runs in the
+  background; new networks appear as NM finds them, and "Scanning…" clears
+  when NM reports the scan finished (`LastScan`).
 
 ## [0.1.0] - 2026-09-04

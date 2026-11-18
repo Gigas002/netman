@@ -207,6 +207,8 @@ fn app_with(connections: Vec<Connection>) -> super::App {
         vpn_add_menu: None,
         vpn_import_prompt: None,
         delete_confirm_prompt: None,
+        #[cfg(feature = "dbus")]
+        scan_pending: None,
         #[cfg(feature = "mobile")]
         pin_unlock_prompt: None,
         #[cfg(feature = "dbus")]
@@ -281,4 +283,31 @@ fn selection_stays_in_range_when_the_selected_connection_disappears() {
     app.selected = 0;
     app.set_items(build_list_items(vec![wifi("B", 80, false)]));
     assert_eq!(app.selected_conn().unwrap().id, "B");
+}
+
+#[cfg(feature = "dbus")]
+#[test]
+fn scanning_status_clears_when_last_scan_moves() {
+    let mut app = app_with(vec![]);
+    app.status_message = Some(super::SCANNING.into());
+    app.scan_pending = Some(5_000);
+
+    app.note_last_scan(Some(5_000));
+    assert_eq!(app.status_message.as_deref(), Some(super::SCANNING));
+
+    app.note_last_scan(Some(9_000));
+    assert_eq!(app.status_message, None);
+    assert_eq!(app.scan_pending, None);
+}
+
+#[cfg(feature = "dbus")]
+#[test]
+fn scanning_status_clears_when_last_scan_is_unavailable() {
+    let mut app = app_with(vec![]);
+    app.status_message = Some(super::SCANNING.into());
+    app.scan_pending = Some(-1);
+
+    app.note_last_scan(None);
+
+    assert_eq!(app.status_message, None);
 }

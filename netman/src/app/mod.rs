@@ -153,6 +153,10 @@ pub struct App {
     pub vpn_import_prompt: Option<VpnImportPrompt>,
     /// Delete saved profile confirmation overlay.
     pub delete_confirm_prompt: Option<DeleteConfirmPrompt>,
+    /// NM's `LastScan` when the user asked for a scan; the scan is done when
+    /// it changes.
+    #[cfg(feature = "dbus")]
+    scan_pending: Option<i64>,
     /// SIM PIN unlock overlay for locked mobile broadband modems.
     #[cfg(feature = "mobile")]
     pub pin_unlock_prompt: Option<PinUnlockPrompt>,
@@ -790,6 +794,7 @@ impl App {
                         vpn_add_menu: None,
                         vpn_import_prompt: None,
                         delete_confirm_prompt: None,
+                        scan_pending: None,
                         #[cfg(feature = "mobile")]
                         pin_unlock_prompt: None,
                         nm: Some(nm),
@@ -822,6 +827,8 @@ impl App {
             vpn_add_menu: None,
             vpn_import_prompt: None,
             delete_confirm_prompt: None,
+            #[cfg(feature = "dbus")]
+            scan_pending: None,
             #[cfg(feature = "mobile")]
             pin_unlock_prompt: None,
             #[cfg(feature = "dbus")]
@@ -853,7 +860,14 @@ impl App {
             self.networking_enabled = nm.networking_enabled().await.unwrap_or(true);
             self.wireless_enabled = nm.wireless_enabled().await.unwrap_or(true);
             let connections = nm.connections().await?;
+            let last_scan = match self.scan_pending {
+                Some(_) => Some(nm.last_scan().await.ok()),
+                None => None,
+            };
             self.set_items(build_list_items(connections));
+            if let Some(last_scan) = last_scan {
+                self.note_last_scan(last_scan);
+            }
             debug!(state = ?self.nm_state, items = self.items.len(), "refreshed");
             #[cfg(feature = "mobile")]
             self.maybe_show_pin_prompt();
@@ -931,7 +945,7 @@ impl App {
                     self.status_message = Some("Wi-Fi is disabled.".into());
                     return Action::Continue;
                 }
-                self.status_message = Some("Scanning…".into());
+                self.status_message = Some(SCANNING.into());
                 return Action::Scan;
             }
             KeyCode::Char('n') => return Action::ToggleNetworking,
@@ -1731,11 +1745,11 @@ impl App {
         } else {
             #[cfg(feature = "dbus")]
             if let Some(nm) = &self.nm {
+                // Don't wait for the scan: refreshes pick up new networks, and
+                // the status clears once NM's LastScan moves.
+                let before = nm.last_scan().await.unwrap_or(-1);
                 match nm.request_wifi_scan().await {
-                    Ok(()) => match self.refresh().await {
-                        Ok(()) => self.status_message = None,
-                        Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
-                    },
+                    Ok(()) => self.scan_pending = Some(before),
                     Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
                 }
             }
@@ -1849,6 +1863,22 @@ impl App {
         nm.deactivate(uuid).await
     }
 
+    #[cfg(feature = "dbus")]
+    /// Finish a requested scan once NM's `LastScan` differs from the value at
+    /// the request (or can't be read, as on NM before 1.12).
+    fn note_last_scan(&mut self, last_scan: Option<i64>) {
+        let Some(before) = self.scan_pending else {
+            return;
+        };
+        if last_scan.is_some_and(|now| now == before) {
+            return;
+        }
+        self.scan_pending = None;
+        if self.status_message.as_deref() == Some(SCANNING) {
+            self.status_message = None;
+        }
+    }
+
     fn clear_inflight_status(&mut self) {
         if self
             .status_message
@@ -1859,6 +1889,9 @@ impl App {
         }
     }
 }
+
+/// Status shown while a requested Wi-Fi scan runs.
+const SCANNING: &str = "Scanning…";
 
 /// Returns `true` for transient connect/disconnect status messages.
 fn is_inflight_status(message: &str) -> bool {

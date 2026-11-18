@@ -15,7 +15,6 @@ mod wifi_settings;
 use crate::vpn_plugins;
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use tracing::{debug, instrument, warn};
 use zbus::Connection;
@@ -162,7 +161,11 @@ impl NmClient {
         Ok(results)
     }
 
-    /// Request a Wi-Fi scan on the first wireless device and wait briefly for results.
+    /// Request a Wi-Fi scan on the first wireless device.
+    ///
+    /// Returns as soon as NM accepts the request; NM scans in the background,
+    /// updates the access-point list, and then advances
+    /// [`last_scan`](Self::last_scan).
     pub async fn request_wifi_scan(&self) -> Result<()> {
         let path = self.find_wireless_path().await?;
         let wireless = DeviceWirelessProxy::builder(&self.conn)
@@ -170,9 +173,18 @@ impl NmClient {
             .build()
             .await?;
         wireless.request_scan(HashMap::new()).await?;
-        // NM completes the scan asynchronously; allow time before reading APs.
-        tokio::time::sleep(Duration::from_secs(2)).await;
         Ok(())
+    }
+
+    /// When the first wireless device last finished a scan (CLOCK_BOOTTIME
+    /// milliseconds; -1 if never). Compare values to see a scan finish.
+    pub async fn last_scan(&self) -> Result<i64> {
+        let path = self.find_wireless_path().await?;
+        let wireless = DeviceWirelessProxy::builder(&self.conn)
+            .path(path.as_str())
+            .build()
+            .await?;
+        Ok(wireless.last_scan().await?)
     }
 
     /// Activate (connect) a saved connection profile.

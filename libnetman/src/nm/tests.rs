@@ -294,6 +294,21 @@ async fn sim_pin_reaches_the_locked_modem() {
     assert_eq!(fake.calls_to("SendPin"), ["SendPin 1234"]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn request_wifi_scan_returns_without_waiting() {
+    let (fake, nm) = FakeNm::start().await;
+    fake.add_wifi_device("wlan0").await;
+    let before = nm.last_scan().await.expect("last scan");
+
+    // Virtual time: a sleep inside would advance this clock.
+    let start = tokio::time::Instant::now();
+    nm.request_wifi_scan().await.expect("scan");
+    assert_eq!(start.elapsed(), std::time::Duration::ZERO);
+
+    assert_eq!(fake.calls_to("RequestScan").len(), 1);
+    assert_ne!(nm.last_scan().await.unwrap(), before);
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
@@ -317,6 +332,8 @@ mod fake {
         pub connections: Vec<(OwnedObjectPath, Settings)>,
         /// IP4Config / IP6Config paths of a connection's activation, by UUID.
         pub ip_configs: HashMap<String, (OwnedObjectPath, OwnedObjectPath)>,
+        /// `LastScan` of every wireless device; a scan request finishes at once.
+        pub last_scan: i64,
         /// Access points, as (device, access point).
         pub access_points: Vec<(OwnedObjectPath, OwnedObjectPath)>,
         /// Method calls NM received, as `"Member arg arg"`.
@@ -360,6 +377,7 @@ mod fake {
                 connections: Vec::new(),
                 access_points: Vec::new(),
                 ip_configs: HashMap::new(),
+                last_scan: -1,
                 calls: Vec::new(),
                 next_id: 0,
             }));
@@ -866,6 +884,12 @@ mod fake {
         fn request_scan(&self, _options: HashMap<String, OwnedVariant>) {
             let mut s = self.state.lock().unwrap();
             s.calls.push(format!("RequestScan {}", self.path));
+            s.last_scan = s.last_scan.max(0) + 1000;
+        }
+
+        #[zbus(property)]
+        fn last_scan(&self) -> i64 {
+            self.state.lock().unwrap().last_scan
         }
     }
 
