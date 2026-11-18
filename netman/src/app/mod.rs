@@ -91,6 +91,7 @@ impl TerminalGuard {
         enable_raw_mode()?;
         // The guard exists from here on: a failure below restores raw mode too.
         let mut guard = Self(terminal);
+        crate::logger::set_terminal_in_use(true);
         execute!(guard.backend_mut(), EnterAlternateScreen)?;
         guard.hide_cursor()?;
         Ok(guard)
@@ -126,6 +127,7 @@ fn restore_terminal() {
         ratatui::crossterm::cursor::Show
     );
     let _ = disable_raw_mode();
+    crate::logger::set_terminal_in_use(false);
 }
 
 /// Restore the terminal before the panic message is printed, so the message

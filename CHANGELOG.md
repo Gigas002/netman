@@ -41,5 +41,8 @@ All notable changes to `netman` are documented here.
 - A panic, or an error while drawing, left the terminal in raw mode on the
   alternate screen. The terminal is now restored on every exit path, and
   before a panic message is printed.
+- Without `--log-file`, warnings (for example "refresh failed" every second
+  while NM restarts) were written to stderr over the TUI. They are now
+  dropped while the TUI is on screen; use `--log-file` to keep them.
 
 ## [0.1.0] - 2026-09-04

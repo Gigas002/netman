@@ -10,8 +10,8 @@
 # level = "warn"
 
 # Write logs to this file instead of stderr.
-# Strongly recommended when running the TUI so that log output does not
-# overwrite terminal rendering.
+# Without it, log lines are dropped while the TUI is on screen (they would
+# draw over it), so set it to keep warnings from a running session.
 # file = "/var/log/netman.log"
 
 [ui]
