@@ -36,8 +36,8 @@ pub trait NetworkManager {
     #[zbus(property)]
     fn networking_enabled(&self) -> zbus::Result<bool>;
 
-    #[zbus(property)]
-    fn set_networking_enabled(&self, value: bool) -> zbus::Result<()>;
+    /// Enable or disable networking; `NetworkingEnabled` itself is read-only.
+    fn enable(&self, enable: bool) -> zbus::Result<()>;
 
     /// Whether Wi-Fi radio is enabled.
     #[zbus(property)]

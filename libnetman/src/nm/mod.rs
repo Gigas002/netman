@@ -100,7 +100,7 @@ impl NmClient {
     /// Enable or disable networking for all devices.
     pub async fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
         let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.set_networking_enabled(enabled).await?;
+        nm.enable(enabled).await?;
         Ok(())
     }
 

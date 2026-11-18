@@ -137,6 +137,31 @@ async fn delete_connection_removes_it() {
     assert!(nm.connections().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn set_networking_enabled_calls_enable() {
+    let (fake, nm) = FakeNm::start().await;
+
+    nm.set_networking_enabled(false).await.expect("disable");
+    assert!(!nm.networking_enabled().await.unwrap());
+    nm.set_networking_enabled(true).await.expect("enable");
+    assert!(nm.networking_enabled().await.unwrap());
+
+    assert_eq!(fake.calls_to("Enable"), ["Enable false", "Enable true"]);
+}
+
+#[tokio::test]
+async fn set_wireless_enabled_writes_the_property() {
+    let (fake, nm) = FakeNm::start().await;
+
+    nm.set_wireless_enabled(false).await.expect("disable");
+
+    assert!(!nm.wireless_enabled().await.unwrap());
+    assert_eq!(
+        fake.calls_to("SetWirelessEnabled"),
+        ["SetWirelessEnabled false"]
+    );
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
