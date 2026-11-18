@@ -44,7 +44,11 @@ pub async fn run(settings: Settings) -> Result<()> {
 
     let tick = Duration::from_millis(settings.tick_rate);
     let mut tick_interval = time::interval(tick);
+    tick_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut input = spawn_input_reader();
 
+    // Draw once per wake-up: a key, a refresh tick, or an NM state change.
+    // Between them the loop sleeps; nothing on screen can change.
     let result = loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
@@ -62,50 +66,18 @@ pub async fn run(settings: Settings) -> Result<()> {
                     }
                 }
             }
-            ready = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(50))) => {
-                match ready {
-                    Ok(Ok(true)) => {
-                        match event::read() {
-                            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                                match app.handle_key(key.code, key.modifiers) {
-                                    Action::Quit => break Ok(()),
-                                    Action::Continue => {}
-                                    Action::Activate(uuid) => app.on_activate(&uuid).await,
-                                    Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
-                                    Action::Scan => app.on_scan().await,
-                                    Action::ToggleNetworking => app.on_toggle_networking().await,
-                                    Action::ToggleWireless => app.on_toggle_wireless().await,
-                                    Action::ConnectUnsaved {
-                                        ssid,
-                                        security,
-                                        password,
-                                        hidden,
-                                    } => app.on_connect_unsaved(ssid, security, password, hidden).await,
-                                    Action::EditConnection(uuid) => app.on_edit_connection(uuid).await,
-                                    Action::SaveConnection => app.on_save_connection().await,
-                                    Action::ImportVpn {
-                                        plugin_name,
-                                        path,
-                                        activate,
-                                    } => app.on_import_vpn(plugin_name, path, activate).await,
-                                    Action::DeleteConnection(uuid) => {
-                                        app.on_delete_connection(uuid).await
-                                    }
-                                    #[cfg(feature = "mobile")]
-                                    Action::UnlockSim { pin } => app.on_unlock_sim(pin).await,
-                                }
-                            }
-                            Ok(Event::Paste(text)) => app.handle_paste(&text),
-                            Ok(Event::Resize(_, _)) => {}
-                            Ok(_) => {}
-                            Err(e) => break Err(anyhow::anyhow!("terminal event error: {e}")),
-                        }
+            event = input.recv() => match event {
+                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    match app.handle_key(key.code, key.modifiers) {
+                        Action::Quit => break Ok(()),
+                        action => app.perform(action).await,
                     }
-                    Ok(Ok(false)) => {}
-                    Ok(Err(e)) => warn!(error = %e, "event poll error"),
-                    Err(e) => break Err(anyhow::anyhow!("task join error: {e}")),
                 }
-            }
+                Some(Ok(Event::Paste(text))) => app.handle_paste(&text),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => break Err(anyhow::anyhow!("terminal event error: {e}")),
+                None => break Err(anyhow::anyhow!("terminal input closed")),
+            },
         }
     };
 
@@ -115,6 +87,25 @@ pub async fn run(settings: Settings) -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+/// Read terminal events on a thread of their own and hand them to the loop.
+///
+/// `event::read` blocks until there is input, so the event loop wakes only
+/// when something happens, instead of polling every 50 ms. The thread ends
+/// after a read error, or stays blocked in `read` until the process exits.
+fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Event>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        loop {
+            let event = event::read();
+            let failed = event.is_err();
+            if tx.send(event).is_err() || failed {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -846,6 +837,37 @@ impl App {
         };
         app.set_items(demo_connections());
         app
+    }
+
+    /// Carry out an action returned by `handle_key` (anything but `Quit`).
+    async fn perform(&mut self, action: Action) {
+        match action {
+            Action::Quit | Action::Continue => {}
+            Action::Activate(uuid) => self.on_activate(&uuid).await,
+            Action::Deactivate(uuid) => self.on_deactivate(&uuid).await,
+            Action::Scan => self.on_scan().await,
+            Action::ToggleNetworking => self.on_toggle_networking().await,
+            Action::ToggleWireless => self.on_toggle_wireless().await,
+            Action::ConnectUnsaved {
+                ssid,
+                security,
+                password,
+                hidden,
+            } => {
+                self.on_connect_unsaved(ssid, security, password, hidden)
+                    .await
+            }
+            Action::EditConnection(uuid) => self.on_edit_connection(uuid).await,
+            Action::SaveConnection => self.on_save_connection().await,
+            Action::ImportVpn {
+                plugin_name,
+                path,
+                activate,
+            } => self.on_import_vpn(plugin_name, path, activate).await,
+            Action::DeleteConnection(uuid) => self.on_delete_connection(uuid).await,
+            #[cfg(feature = "mobile")]
+            Action::UnlockSim { pin } => self.on_unlock_sim(pin).await,
+        }
     }
 
     #[instrument(skip(self))]
