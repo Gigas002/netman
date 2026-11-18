@@ -10,6 +10,7 @@ use zbus::OwnedVariant;
 use super::proxies::{
     DeviceModemProxy, DeviceProxy, MmModem3gppProxy, MmModemProxy, MmSimProxy, NetworkManagerProxy,
 };
+use super::uncached;
 use crate::{
     Result,
     connection::{AccessTechnology, ModemInfo, ModemLiveData},
@@ -51,7 +52,7 @@ pub fn build_modem_info(raw: &HashMap<String, HashMap<String, OwnedVariant>>) ->
 
 /// Fetch live data from all modem devices managed by NetworkManager.
 pub async fn fetch_modem_live_data(conn: &zbus::Connection) -> Vec<ModemLiveData> {
-    let nm = match NetworkManagerProxy::new(conn).await {
+    let nm = match uncached::<NetworkManagerProxy>(conn).build().await {
         Ok(nm) => nm,
         Err(e) => {
             warn!(error = %e, "failed to reach NetworkManager for modem data");
@@ -80,9 +81,9 @@ pub async fn fetch_modem_live_data(conn: &zbus::Connection) -> Vec<ModemLiveData
 
 /// Send a SIM PIN to unlock the first locked modem.
 pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
-    let nm = NetworkManagerProxy::new(conn).await?;
+    let nm = uncached::<NetworkManagerProxy>(conn).build().await?;
     for path in nm.devices().await? {
-        let dev = DeviceProxy::builder(conn)
+        let dev = uncached::<DeviceProxy>(conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -94,7 +95,7 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
             continue;
         };
 
-        let mm = MmModemProxy::builder(conn)
+        let mm = uncached::<MmModemProxy>(conn)
             .path(mm_path.as_str())
             .build()
             .await?;
@@ -109,7 +110,7 @@ pub async fn send_sim_pin(conn: &zbus::Connection, pin: &str) -> Result<()> {
             return Err(Error::OperationFailed("no SIM present".into()));
         }
 
-        let sim = MmSimProxy::builder(conn)
+        let sim = uncached::<MmSimProxy>(conn)
             .path(sim_path.as_str())
             .build()
             .await?;
@@ -125,7 +126,7 @@ async fn build_modem_live_data(
     conn: &zbus::Connection,
     path: &str,
 ) -> Result<Option<ModemLiveData>> {
-    let dev = DeviceProxy::builder(conn).path(path).build().await?;
+    let dev = uncached::<DeviceProxy>(conn).path(path).build().await?;
 
     if dev.device_type().await? != DEVICE_TYPE_MODEM {
         return Ok(None);
@@ -133,7 +134,10 @@ async fn build_modem_live_data(
 
     let interface = dev.interface().await.unwrap_or_default();
 
-    let modem = DeviceModemProxy::builder(conn).path(path).build().await?;
+    let modem = uncached::<DeviceModemProxy>(conn)
+        .path(path)
+        .build()
+        .await?;
 
     let operator_code = modem.operator_code().await.ok().filter(|c| !c.is_empty());
     let apn = modem.apn().await.ok().filter(|a| !a.is_empty());
@@ -146,7 +150,7 @@ async fn build_modem_live_data(
     let mut sim_locked = false;
 
     if let Some(mm_path) = &mm_path
-        && let Ok(mm) = MmModemProxy::builder(conn)
+        && let Ok(mm) = uncached::<MmModemProxy>(conn)
             .path(mm_path.as_str())
             .build()
             .await
@@ -161,7 +165,7 @@ async fn build_modem_live_data(
             access_technology = mm_access_technology(tech);
         }
 
-        if let Ok(mm3gpp) = MmModem3gppProxy::builder(conn)
+        if let Ok(mm3gpp) = uncached::<MmModem3gppProxy>(conn)
             .path(mm_path.as_str())
             .build()
             .await

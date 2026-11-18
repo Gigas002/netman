@@ -309,6 +309,35 @@ async fn request_wifi_scan_returns_without_waiting() {
     assert_ne!(nm.last_scan().await.unwrap(), before);
 }
 
+#[tokio::test]
+async fn refresh_reads_each_object_once() {
+    let (fake, nm) = FakeNm::start().await;
+    let dev = fake.add_wifi_device("wlan0").await;
+    let mut saved = Vec::new();
+    for i in 0..5 {
+        let id = format!("Net{i}");
+        saved.push(fake.add_connection(wifi_settings(&id, &id)).await);
+    }
+    let ap = fake
+        .add_ap(&dev, b"Net0", 60, 2412, PRIVACY, 0, PSK | CCMP)
+        .await;
+    nm.activate("Net0").await.unwrap();
+    let active = fake.state.lock().unwrap().active[0].0.to_string();
+    fake.settle(&nm).await;
+    fake.clear_wire();
+
+    nm.connections().await.unwrap();
+    fake.settle(&nm).await;
+
+    // One GetAll per active connection and access point, one GetSettings per
+    // profile, however many profiles there are.
+    assert_eq!(fake.wire_calls_on(&active), 1);
+    assert_eq!(fake.wire_calls_on(ap.as_str()), 1);
+    for p in &saved {
+        assert_eq!(fake.wire_calls_on(p.as_str()), 1);
+    }
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
@@ -363,6 +392,8 @@ mod fake {
     pub struct FakeNm {
         pub state: Shared,
         server: zbus::Connection,
+        /// Every method call received, property reads included, as (path, member).
+        wire: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl FakeNm {
@@ -390,14 +421,57 @@ mod fake {
                 .build();
             let client = zbus::connection::Builder::unix_stream(b).p2p().build();
             let (server, client) = tokio::join!(server, client);
+            let server = server.expect("server");
+            let wire = Arc::new(Mutex::new(Vec::new()));
+            let mut stream = zbus::MessageStream::from(&server);
+            let log = wire.clone();
+            tokio::spawn(async move {
+                use tokio_stream::StreamExt;
+                while let Some(Ok(msg)) = stream.next().await {
+                    let header = msg.header();
+                    if header.message_type() == zbus::message::Type::MethodCall {
+                        let path = header.path().map(|p| p.to_string()).unwrap_or_default();
+                        let member = header.member().map(|m| m.to_string()).unwrap_or_default();
+                        log.lock().unwrap().push((path, member));
+                    }
+                }
+            });
             let fake = Self {
                 state,
-                server: server.expect("server"),
+                server,
+                wire,
             };
             let nm = NmClient::with_connection(client.expect("client"))
                 .await
                 .expect("NmClient");
             (fake, nm)
+        }
+
+        /// Method calls received on `path` so far, property reads included.
+        pub fn wire_calls_on(&self, path: &str) -> usize {
+            let wire = self.wire.lock().unwrap();
+            wire.iter().filter(|(p, _)| p == path).count()
+        }
+
+        pub fn clear_wire(&self) {
+            self.wire.lock().unwrap().clear();
+        }
+
+        /// Wait until the call log has every call made so far. Messages are
+        /// logged in arrival order, so once a marker call sent now is in the
+        /// log, so is everything before it. No timeouts involved.
+        pub async fn settle(&self, nm: &NmClient) {
+            let marker = |wire: &Vec<(String, String)>| {
+                wire.iter()
+                    .filter(|(p, m)| p == SETTINGS_PATH && m == "GetConnectionByUuid")
+                    .count()
+            };
+            let target = marker(&self.wire.lock().unwrap()) + 1;
+            // No such UUID: one GetConnectionByUuid call, then an error.
+            let _ = nm.get_connection_profile("settle-marker").await;
+            while marker(&self.wire.lock().unwrap()) < target {
+                tokio::task::yield_now().await;
+            }
         }
 
         pub fn calls_to(&self, member: &str) -> Vec<String> {
