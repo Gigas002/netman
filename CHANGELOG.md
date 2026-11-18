@@ -6,6 +6,15 @@ All notable changes to `netman` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- An idle netman uses less CPU: it waits for input instead of polling the
+  terminal 20 times a second, and redraws only when something changed
+  (idle CPU 1.4 % to 0.2 % against a mock NM).
+- A refresh makes a third of the D-Bus calls it did (162 to 55 for 30 access
+  points and 18 profiles): proxies no longer subscribe to property changes
+  they never use, and objects are read with one `GetAll`.
+
 ### Fixed
 
 - Connecting, disconnecting, connecting to a new network and saving an edited
