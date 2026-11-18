@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use zbus::{OwnedObjectPath, OwnedVariant, proxy};
+use zbus::{ObjectPath, OwnedObjectPath, OwnedVariant, proxy};
 
 // ── org.freedesktop.NetworkManager ───────────────────────────────────────────
 
@@ -49,20 +49,20 @@ pub trait NetworkManager {
     /// Activate a previously saved connection on a device.
     fn activate_connection(
         &self,
-        connection: &str,
-        device: &str,
-        specific_object: &str,
+        connection: &ObjectPath<'_>,
+        device: &ObjectPath<'_>,
+        specific_object: &ObjectPath<'_>,
     ) -> zbus::Result<OwnedObjectPath>;
 
     /// Deactivate an active connection.
-    fn deactivate_connection(&self, active_connection: &str) -> zbus::Result<()>;
+    fn deactivate_connection(&self, active_connection: &ObjectPath<'_>) -> zbus::Result<()>;
 
     /// Add a new connection from settings and activate it immediately.
     fn add_and_activate_connection(
         &self,
         connection: HashMap<String, HashMap<String, OwnedVariant>>,
-        device: &str,
-        specific_object: &str,
+        device: &ObjectPath<'_>,
+        specific_object: &ObjectPath<'_>,
     ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
@@ -108,11 +108,8 @@ pub trait SettingsConnection {
         &self,
         settings: HashMap<String, HashMap<String, OwnedVariant>>,
         flags: u32,
-    ) -> zbus::Result<(
-        HashMap<String, HashMap<String, OwnedVariant>>,
-        HashMap<String, OwnedVariant>,
-        HashMap<String, OwnedVariant>,
-    )>;
+        args: HashMap<String, OwnedVariant>,
+    ) -> zbus::Result<HashMap<String, OwnedVariant>>;
 
     /// Remove this connection profile from NetworkManager.
     fn delete(&self) -> zbus::Result<()>;

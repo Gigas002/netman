@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tracing::{debug, instrument, warn};
 use zbus::Connection;
-use zbus::OwnedVariant;
+use zbus::{ObjectPath, OwnedVariant};
 
 use crate::{
     Result,
@@ -36,6 +36,9 @@ use proxies::{
     Ip6ConfigProxy, NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
 };
 
+/// The "no object" path NM takes for an optional object argument.
+const NO_OBJECT: ObjectPath<'static> = ObjectPath::from_static_str_unchecked("/");
+
 /// NM device type constant for Wi-Fi adapters.
 const DEVICE_TYPE_WIFI: u32 = 2;
 
@@ -51,7 +54,15 @@ impl NmClient {
         let conn = Connection::system()
             .await
             .map_err(|e| Error::DBus(format!("system bus: {e}")))?;
+        Self::with_connection(conn).await
+    }
 
+    /// Use an existing D-Bus connection instead of the system bus, and verify
+    /// NetworkManager answers on it.
+    ///
+    /// This is for a private bus or a peer-to-peer link to a test double;
+    /// [`NmClient::connect`] is the normal entry point.
+    pub async fn with_connection(conn: Connection) -> Result<Self> {
         // Ping NM to confirm it's running.
         let nm = NetworkManagerProxy::new(&conn).await?;
         let _ = nm.state().await?;
@@ -167,7 +178,8 @@ impl NmClient {
         let settings = SettingsProxy::new(&self.conn).await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
         let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.activate_connection(path.as_str(), "/", "/").await?;
+        nm.activate_connection(&path, &NO_OBJECT, &NO_OBJECT)
+            .await?;
         Ok(())
     }
 
@@ -184,7 +196,7 @@ impl NmClient {
         let settings = wifi_connection_settings(ssid, security, password, hidden)?;
         let device = self.find_wireless_path().await?;
         let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.add_and_activate_connection(settings, device.as_str(), "/")
+        nm.add_and_activate_connection(settings, &device, &NO_OBJECT)
             .await?;
         Ok(())
     }
@@ -252,7 +264,7 @@ impl NmClient {
             .path(path.as_str())
             .build()
             .await?;
-        sc.update2(updated, UPDATE2_TO_DISK).await?;
+        sc.update2(updated, UPDATE2_TO_DISK, HashMap::new()).await?;
         Ok(())
     }
 
@@ -344,7 +356,7 @@ impl NmClient {
                 .build()
                 .await?;
             if proxy.uuid().await? == uuid {
-                nm.deactivate_connection(p.as_str()).await?;
+                nm.deactivate_connection(p).await?;
                 return Ok(());
             }
         }
