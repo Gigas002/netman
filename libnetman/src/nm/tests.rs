@@ -10,7 +10,7 @@ use zbus::{OwnedVariant, Variant};
 use crate::connection::{ConnectionProfile, ConnectionStatus, WifiSecurity};
 
 use super::security_from_ap;
-use fake::{FakeNm, Settings};
+use fake::{FakeNm, IpData, Settings};
 
 // Flag values as NM reports them (NM80211ApSecurityFlags): pairwise and
 // group CCMP are 0x8 | 0x80, TKIP 0x4 | 0x40.
@@ -229,6 +229,38 @@ async fn access_points_report_their_security() {
     assert_eq!(security("Sae-Only"), WifiSecurity::Wpa3);
 }
 
+#[tokio::test]
+async fn active_connection_reports_ipv4_and_ipv6_dns() {
+    let (fake, nm) = FakeNm::start().await;
+    fake.add_connection(wifi_settings("Home", "u-home")).await;
+    fake.set_ip(
+        "u-home",
+        IpData {
+            address: "192.168.1.10",
+            prefix: 24,
+            gateway: "192.168.1.1",
+            dns: vec!["1.1.1.1".parse().unwrap()],
+        },
+        IpData {
+            address: "2001:db8::10",
+            prefix: 64,
+            gateway: "fe80::1",
+            dns: vec!["2001:4860:4860::8888".parse().unwrap()],
+        },
+    )
+    .await;
+    nm.activate("u-home").await.expect("activate");
+
+    let conn = nm.connections().await.unwrap().remove(0);
+    let ip4 = conn.ip4.expect("ip4");
+    assert_eq!(ip4.address, "192.168.1.10/24");
+    assert_eq!(ip4.nameservers, ["1.1.1.1"]);
+    let ip6 = conn.ip6.expect("ip6");
+    assert_eq!(ip6.address, "2001:db8::10/64");
+    assert_eq!(ip6.gateway.as_deref(), Some("fe80::1"));
+    assert_eq!(ip6.nameservers, ["2001:4860:4860::8888"]);
+}
+
 /// An in-process NetworkManager double.
 mod fake {
     use std::collections::HashMap;
@@ -250,6 +282,8 @@ mod fake {
         pub devices: Vec<OwnedObjectPath>,
         pub active: Vec<(OwnedObjectPath, String)>,
         pub connections: Vec<(OwnedObjectPath, Settings)>,
+        /// IP4Config / IP6Config paths of a connection's activation, by UUID.
+        pub ip_configs: HashMap<String, (OwnedObjectPath, OwnedObjectPath)>,
         /// Access points, as (device, access point).
         pub access_points: Vec<(OwnedObjectPath, OwnedObjectPath)>,
         /// Method calls NM received, as `"Member arg arg"`.
@@ -292,6 +326,7 @@ mod fake {
                 active: Vec::new(),
                 connections: Vec::new(),
                 access_points: Vec::new(),
+                ip_configs: HashMap::new(),
                 calls: Vec::new(),
                 next_id: 0,
             }));
@@ -357,6 +392,31 @@ mod fake {
                 .expect("serve Wireless");
             self.state.lock().unwrap().devices.push(p.clone());
             p
+        }
+
+        /// Give `uuid`'s activations these addresses (address/prefix, gateway, DNS).
+        pub async fn set_ip(&self, uuid: &str, v4: IpData, v6: IpData) {
+            let (p4, p6) = {
+                let mut s = self.state.lock().unwrap();
+                (
+                    s.next_path(&format!("{NM_PATH}/IP4Config")),
+                    s.next_path(&format!("{NM_PATH}/IP6Config")),
+                )
+            };
+            let server = self.server.object_server();
+            server
+                .at(&p4, Ip4Config(v4))
+                .await
+                .expect("serve IP4Config");
+            server
+                .at(&p6, Ip6Config(v6))
+                .await
+                .expect("serve IP6Config");
+            self.state
+                .lock()
+                .unwrap()
+                .ip_configs
+                .insert(uuid.to_owned(), (p4, p6));
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -443,6 +503,7 @@ mod fake {
             .at(
                 &p,
                 Active {
+                    state: state.clone(),
                     uuid: uuid.clone(),
                     devices,
                 },
@@ -633,8 +694,19 @@ mod fake {
     }
 
     struct Active {
+        state: Shared,
         uuid: String,
         devices: Vec<OwnedObjectPath>,
+    }
+
+    impl Active {
+        fn ip_config(&self, v6: bool) -> OwnedObjectPath {
+            let s = self.state.lock().unwrap();
+            match s.ip_configs.get(&self.uuid) {
+                Some((p4, p6)) => if v6 { p6 } else { p4 }.clone(),
+                None => path("/"),
+            }
+        }
     }
 
     #[interface(name = "org.freedesktop.NetworkManager.Connection.Active")]
@@ -656,12 +728,12 @@ mod fake {
 
         #[zbus(property)]
         fn ip4_config(&self) -> OwnedObjectPath {
-            path("/")
+            self.ip_config(false)
         }
 
         #[zbus(property)]
         fn ip6_config(&self) -> OwnedObjectPath {
-            path("/")
+            self.ip_config(true)
         }
     }
 
@@ -754,6 +826,74 @@ mod fake {
         #[zbus(property)]
         fn hw_address(&self) -> String {
             "02:00:00:00:00:01".into()
+        }
+    }
+
+    /// Address, prefix, gateway and DNS servers of a fake IP config.
+    pub struct IpData {
+        pub address: &'static str,
+        pub prefix: u32,
+        pub gateway: &'static str,
+        pub dns: Vec<std::net::IpAddr>,
+    }
+
+    fn address_data(ip: &IpData) -> Vec<HashMap<String, OwnedVariant>> {
+        let mut entry = HashMap::new();
+        entry.insert("address".into(), super::v(ip.address));
+        entry.insert("prefix".into(), super::v(ip.prefix));
+        vec![entry]
+    }
+
+    struct Ip4Config(IpData);
+
+    #[interface(name = "org.freedesktop.NetworkManager.IP4Config")]
+    impl Ip4Config {
+        #[zbus(property)]
+        fn address_data(&self) -> Vec<HashMap<String, OwnedVariant>> {
+            address_data(&self.0)
+        }
+
+        #[zbus(property)]
+        fn gateway(&self) -> String {
+            self.0.gateway.into()
+        }
+
+        #[zbus(property)]
+        fn nameserver_data(&self) -> Vec<HashMap<String, OwnedVariant>> {
+            self.0
+                .dns
+                .iter()
+                .map(|a| HashMap::from([("address".to_owned(), super::v(a.to_string()))]))
+                .collect()
+        }
+    }
+
+    /// As in NM: IPv6 DNS servers are `Nameservers` (`aay`); there is no
+    /// `NameserverData` on this interface.
+    struct Ip6Config(IpData);
+
+    #[interface(name = "org.freedesktop.NetworkManager.IP6Config")]
+    impl Ip6Config {
+        #[zbus(property)]
+        fn address_data(&self) -> Vec<HashMap<String, OwnedVariant>> {
+            address_data(&self.0)
+        }
+
+        #[zbus(property)]
+        fn gateway(&self) -> String {
+            self.0.gateway.into()
+        }
+
+        #[zbus(property)]
+        fn nameservers(&self) -> Vec<Vec<u8>> {
+            self.0
+                .dns
+                .iter()
+                .filter_map(|a| match a {
+                    std::net::IpAddr::V6(v6) => Some(v6.octets().to_vec()),
+                    std::net::IpAddr::V4(_) => None,
+                })
+                .collect()
         }
     }
 }

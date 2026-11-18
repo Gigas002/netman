@@ -248,9 +248,9 @@ pub trait Ip6Config {
     #[zbus(property)]
     fn gateway(&self) -> zbus::Result<String>;
 
-    /// List of nameserver data maps (key: `address`).
+    /// DNS servers as 16-byte addresses (IP6Config has no `NameserverData`).
     #[zbus(property)]
-    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
+    fn nameservers(&self) -> zbus::Result<Vec<Vec<u8>>>;
 }
 
 // ── org.freedesktop.NetworkManager.Device.Modem ───────────────────────────────

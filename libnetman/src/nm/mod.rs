@@ -699,19 +699,21 @@ async fn parse_ip6_config(cfg: &Ip6ConfigProxy<'_>) -> Option<Ip6Config> {
     let addresses = cfg.address_data().await.ok()?;
     let parsed = parse_live_ip_config(&addresses, 64)?;
     let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
-    let nameservers = cfg
-        .nameserver_data()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|ns| get_str_value(&ns, "address"))
-        .collect();
+    let nameservers = ipv6_nameservers(cfg.nameservers().await.unwrap_or_default());
 
     Some(Ip6Config {
         address: parsed,
         gateway,
         nameservers,
     })
+}
+
+/// Format IP6Config `Nameservers` (`aay`, 16 bytes each) as addresses.
+fn ipv6_nameservers(raw: Vec<Vec<u8>>) -> Vec<String> {
+    raw.into_iter()
+        .filter_map(|bytes| <[u8; 16]>::try_from(bytes).ok())
+        .map(|octets| std::net::Ipv6Addr::from(octets).to_string())
+        .collect()
 }
 
 fn parse_live_ip_config(

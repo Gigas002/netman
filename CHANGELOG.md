@@ -20,5 +20,7 @@ All notable changes to `netman` are documented here.
   showed as WPA2. OWE networks are now joined without a password.
 - 6 GHz networks were labelled "5 GHz", and an access point with no reported
   frequency was labelled "2.4 GHz" with "0 MHz" in the detail panel.
+- The detail panel never showed IPv6 DNS servers: they were read from
+  `NameserverData`, which only IPv4 configs have.
 
 ## [0.1.0] - 2026-09-04
