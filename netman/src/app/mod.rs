@@ -723,6 +723,15 @@ impl ListItem {
     pub fn is_selectable(&self) -> bool {
         matches!(self, Self::Connection(_) | Self::HiddenWifiConnect)
     }
+
+    /// Identity of a selectable row across refreshes.
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Connection(c) => Some(&c.uuid),
+            Self::HiddenWifiConnect => Some(""),
+            Self::Header(_) => None,
+        }
+    }
 }
 
 /// Outcome of handling a key event.
@@ -828,7 +837,7 @@ impl App {
                 }
             },
         };
-        app.items = demo_connections();
+        app.set_items(demo_connections());
         app
     }
 
@@ -844,18 +853,36 @@ impl App {
             self.networking_enabled = nm.networking_enabled().await.unwrap_or(true);
             self.wireless_enabled = nm.wireless_enabled().await.unwrap_or(true);
             let connections = nm.connections().await?;
-            self.items = build_list_items(connections);
-            // Keep selection in bounds after refresh.
-            let conn_count = self.items.iter().filter(|i| i.is_selectable()).count();
-            if conn_count > 0 {
-                self.selected = self.selected.min(conn_count - 1);
-            }
+            self.set_items(build_list_items(connections));
             debug!(state = ?self.nm_state, items = self.items.len(), "refreshed");
             #[cfg(feature = "mobile")]
             self.maybe_show_pin_prompt();
         }
 
         Ok(())
+    }
+
+    /// Replace the list, keeping the selection on the same entry.
+    ///
+    /// Every refresh re-sorts Wi-Fi by signal strength, so the entry at the
+    /// selected position changes; Enter or `d` must act on the one the user
+    /// picked. When that entry is gone, the position is kept (clamped).
+    fn set_items(&mut self, items: Vec<ListItem>) {
+        let key = self
+            .selected_list_item()
+            .and_then(ListItem::key)
+            .map(str::to_owned);
+        self.items = items;
+        let selectable: Vec<&ListItem> = self.items.iter().filter(|i| i.is_selectable()).collect();
+        let found = key.and_then(|key| {
+            selectable
+                .iter()
+                .position(|i| i.key() == Some(key.as_str()))
+        });
+        self.selected = match found {
+            Some(idx) => idx,
+            None => self.selected.min(selectable.len().saturating_sub(1)),
+        };
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {

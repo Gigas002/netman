@@ -26,5 +26,8 @@ All notable changes to `netman` are documented here.
   lock state were never shown, and SIM PIN unlock always failed. The
   ModemManager object was looked up by NM's `DeviceId`, an opaque hash, instead
   of the device's `Udi`.
+- The selection kept its position while each refresh re-sorted Wi-Fi networks
+  by signal, so Enter, `d`, `D` or `e` could act on a different network than
+  the highlighted one a moment earlier. It now stays on the same connection.
 
 ## [0.1.0] - 2026-09-04

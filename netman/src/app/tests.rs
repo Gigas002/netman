@@ -251,3 +251,34 @@ fn enter_on_an_owe_network_connects_without_a_password() {
         }
     ));
 }
+
+#[test]
+fn selection_follows_the_connection_when_a_refresh_reorders_the_list() {
+    let mut app = app_with(vec![wifi("Strong", 90, false), wifi("Weak", 40, false)]);
+    app.selected = 1;
+    assert_eq!(app.selected_conn().unwrap().id, "Weak");
+
+    // Signal changed: "Weak" now sorts first.
+    app.set_items(build_list_items(vec![
+        wifi("Strong", 30, false),
+        wifi("Weak", 80, false),
+    ]));
+
+    assert_eq!(app.selected_conn().unwrap().id, "Weak");
+}
+
+#[test]
+fn selection_stays_in_range_when_the_selected_connection_disappears() {
+    let mut app = app_with(vec![
+        wifi("A", 90, false),
+        wifi("B", 80, false),
+        wifi("C", 70, false),
+    ]);
+    app.selected = 3; // the "Connect to hidden…" row
+    app.set_items(build_list_items(vec![wifi("A", 90, false)]));
+    assert!(app.selected_hidden_wifi());
+
+    app.selected = 0;
+    app.set_items(build_list_items(vec![wifi("B", 80, false)]));
+    assert_eq!(app.selected_conn().unwrap().id, "B");
+}
