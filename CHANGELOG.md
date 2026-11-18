@@ -32,5 +32,8 @@ All notable changes to `netman` are documented here.
 - Scanning (`r` / `F5`) froze the UI for two seconds. The scan now runs in the
   background; new networks appear as NM finds them, and "Scanning…" clears
   when NM reports the scan finished (`LastScan`).
+- `[network] auto_scan` and `scan_interval` were read but never used; netman
+  now asks NM for a scan every `scan_interval` seconds (30 by default) while
+  Wi-Fi is on.
 
 ## [0.1.0] - 2026-09-04

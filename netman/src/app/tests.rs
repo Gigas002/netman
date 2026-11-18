@@ -311,3 +311,38 @@ fn scanning_status_clears_when_last_scan_is_unavailable() {
 
     assert_eq!(app.status_message, None);
 }
+
+#[cfg(feature = "dbus")]
+#[test]
+fn auto_scan_only_with_nm_and_wifi_on() {
+    let mut app = app_with(vec![]);
+    assert!(app.wants_auto_scan());
+    app.wireless_enabled = false;
+    assert!(!app.wants_auto_scan());
+    app.wireless_enabled = true;
+    app.networking_enabled = false;
+    assert!(!app.wants_auto_scan());
+    app.networking_enabled = true;
+    app.demo_mode = true;
+    assert!(!app.wants_auto_scan());
+}
+
+#[test]
+fn auto_scan_timer_follows_settings() {
+    let mut settings = crate::settings::Settings::default();
+    assert!(settings.auto_scan);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    assert_eq!(
+        super::auto_scan_timer(&settings).map(|t| t.period()),
+        Some(std::time::Duration::from_secs(30))
+    );
+    settings.scan_interval = 0;
+    assert!(super::auto_scan_timer(&settings).is_none());
+    settings.scan_interval = 30;
+    settings.auto_scan = false;
+    assert!(super::auto_scan_timer(&settings).is_none());
+}

@@ -46,6 +46,7 @@ pub async fn run(settings: Settings) -> Result<()> {
     let mut tick_interval = time::interval(tick);
     tick_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut input = spawn_input_reader();
+    let mut scan_timer = auto_scan_timer(&settings);
 
     // Draw once per wake-up: a key, a refresh tick, or an NM state change.
     // Between them the loop sleeps; nothing on screen can change.
@@ -66,6 +67,7 @@ pub async fn run(settings: Settings) -> Result<()> {
                     }
                 }
             }
+            _ = next_tick(&mut scan_timer) => app.on_auto_scan().await,
             event = input.recv() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     match app.handle_key(key.code, key.modifiers) {
@@ -87,6 +89,28 @@ pub async fn run(settings: Settings) -> Result<()> {
     terminal.show_cursor()?;
 
     result
+}
+
+/// The `[network] auto_scan` timer: every `scan_interval` seconds, starting
+/// one interval after launch. `None` when automatic scans are off.
+fn auto_scan_timer(settings: &Settings) -> Option<time::Interval> {
+    if !settings.auto_scan || settings.scan_interval == 0 {
+        return None;
+    }
+    let period = Duration::from_secs(settings.scan_interval);
+    let mut timer = time::interval_at(time::Instant::now() + period, period);
+    timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    Some(timer)
+}
+
+/// Wait for the next tick of `timer`, or forever when there is none.
+async fn next_tick(timer: &mut Option<time::Interval>) {
+    match timer {
+        Some(timer) => {
+            timer.tick().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// Read terminal events on a thread of their own and hand them to the loop.
@@ -1775,6 +1799,24 @@ impl App {
                     Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
                 }
             }
+        }
+    }
+
+    /// Whether a periodic scan makes sense now: NM is live and Wi-Fi is on.
+    #[cfg(feature = "dbus")]
+    fn wants_auto_scan(&self) -> bool {
+        !self.demo_mode && self.networking_enabled && self.wireless_enabled
+    }
+
+    /// A periodic scan: no status message, and a refused request (NM rate
+    /// limits scans) is only logged.
+    async fn on_auto_scan(&mut self) {
+        #[cfg(feature = "dbus")]
+        if self.wants_auto_scan()
+            && let Some(nm) = &self.nm
+            && let Err(e) = nm.request_wifi_scan().await
+        {
+            debug!(error = %e, "automatic scan not started");
         }
     }
 
