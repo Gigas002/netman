@@ -55,6 +55,16 @@ pub struct NetworkConfig {
     pub scan_interval: Option<u64>,
 }
 
+impl FileConfig {
+    /// Reject values the application can't run with.
+    pub fn validate(&self) -> Result<()> {
+        if self.ui.tick_rate == Some(0) {
+            anyhow::bail!("ui.tick_rate must be at least 1 (milliseconds)");
+        }
+        Ok(())
+    }
+}
+
 /// Load the configuration file at `path` (or the XDG default location when
 /// `path` is `None`).  Returns `None` when no file is found.
 pub fn load(path: Option<&Path>) -> Result<Option<FileConfig>> {
@@ -77,6 +87,8 @@ pub fn load(path: Option<&Path>) -> Result<Option<FileConfig>> {
         .with_context(|| format!("reading config file {}", file.display()))?;
     let cfg: FileConfig =
         toml::from_str(&raw).with_context(|| format!("parsing config file {}", file.display()))?;
+    cfg.validate()
+        .with_context(|| format!("checking config file {}", file.display()))?;
     Ok(Some(cfg))
 }
 

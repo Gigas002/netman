@@ -32,20 +32,19 @@ use crate::{settings::Settings, ui};
 pub async fn run(settings: Settings) -> Result<()> {
     let mut app = App::new(&settings).await;
 
-    // Terminal setup.
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.hide_cursor()?;
+    let mut terminal = TerminalGuard::enter()?;
 
     info!("netman started");
 
     let tick = Duration::from_millis(settings.tick_rate);
     let mut tick_interval = time::interval(tick);
+    tick_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut input = spawn_input_reader();
+    let mut scan_timer = auto_scan_timer(&settings);
 
-    let result = loop {
+    // Draw once per wake-up: a key, a refresh tick, or an NM state change.
+    // Between them the loop sleeps; nothing on screen can change.
+    loop {
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
         tokio::select! {
@@ -62,59 +61,134 @@ pub async fn run(settings: Settings) -> Result<()> {
                     }
                 }
             }
-            ready = tokio::task::spawn_blocking(|| event::poll(Duration::from_millis(50))) => {
-                match ready {
-                    Ok(Ok(true)) => {
-                        match event::read() {
-                            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                                match app.handle_key(key.code, key.modifiers) {
-                                    Action::Quit => break Ok(()),
-                                    Action::Continue => {}
-                                    Action::Activate(uuid) => app.on_activate(&uuid).await,
-                                    Action::Deactivate(uuid) => app.on_deactivate(&uuid).await,
-                                    Action::Scan => app.on_scan().await,
-                                    Action::ToggleNetworking => app.on_toggle_networking().await,
-                                    Action::ToggleWireless => app.on_toggle_wireless().await,
-                                    Action::ConnectUnsaved {
-                                        ssid,
-                                        security,
-                                        password,
-                                        hidden,
-                                    } => app.on_connect_unsaved(ssid, security, password, hidden).await,
-                                    Action::EditConnection(uuid) => app.on_edit_connection(uuid).await,
-                                    Action::SaveConnection => app.on_save_connection().await,
-                                    Action::ImportVpn {
-                                        plugin_name,
-                                        path,
-                                        activate,
-                                    } => app.on_import_vpn(plugin_name, path, activate).await,
-                                    Action::DeleteConnection(uuid) => {
-                                        app.on_delete_connection(uuid).await
-                                    }
-                                    #[cfg(feature = "mobile")]
-                                    Action::UnlockSim { pin } => app.on_unlock_sim(pin).await,
-                                }
-                            }
-                            Ok(Event::Paste(text)) => app.handle_paste(&text),
-                            Ok(Event::Resize(_, _)) => {}
-                            Ok(_) => {}
-                            Err(e) => break Err(anyhow::anyhow!("terminal event error: {e}")),
-                        }
+            _ = next_tick(&mut scan_timer) => app.on_auto_scan().await,
+            event = input.recv() => match event {
+                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    match app.handle_key(key.code, key.modifiers) {
+                        Action::Quit => break Ok(()),
+                        action => app.perform(action).await,
                     }
-                    Ok(Ok(false)) => {}
-                    Ok(Err(e)) => warn!(error = %e, "event poll error"),
-                    Err(e) => break Err(anyhow::anyhow!("task join error: {e}")),
                 }
+                Some(Ok(Event::Paste(text))) => app.handle_paste(&text),
+                Some(Ok(_)) => {}
+                Some(Err(e)) => break Err(anyhow::anyhow!("terminal event error: {e}")),
+                None => break Err(anyhow::anyhow!("terminal input closed")),
+            },
+        }
+    }
+}
+
+/// The terminal in TUI mode: raw input and the alternate screen.
+///
+/// Dropping the guard restores the terminal, so every way out of `run` does,
+/// errors included; the panic hook does the same on a panic.
+struct TerminalGuard(Terminal<CrosstermBackend<std::io::Stdout>>);
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        install_panic_hook();
+        let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        enable_raw_mode()?;
+        // The guard exists from here on: a failure below restores raw mode too.
+        let mut guard = Self(terminal);
+        crate::logger::set_terminal_in_use(true);
+        // Bracketed paste: a paste arrives as one Event::Paste instead of
+        // key presses, where a newline would act as Enter.
+        execute!(
+            guard.backend_mut(),
+            EnterAlternateScreen,
+            ratatui::crossterm::event::EnableBracketedPaste
+        )?;
+        guard.hide_cursor()?;
+        Ok(guard)
+    }
+}
+
+impl std::ops::Deref for TerminalGuard {
+    type Target = Terminal<CrosstermBackend<std::io::Stdout>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TerminalGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Leave the alternate screen, show the cursor and turn raw mode off.
+/// Safe to call when the terminal is already restored.
+fn restore_terminal() {
+    let _ = execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste,
+        LeaveAlternateScreen,
+        ratatui::crossterm::cursor::Show
+    );
+    let _ = disable_raw_mode();
+    crate::logger::set_terminal_in_use(false);
+}
+
+/// Restore the terminal before the panic message is printed, so the message
+/// is readable and the shell isn't left in raw mode.
+fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            previous(info);
+        }));
+    });
+}
+
+/// The `[network] auto_scan` timer: every `scan_interval` seconds, starting
+/// one interval after launch. `None` when automatic scans are off.
+fn auto_scan_timer(settings: &Settings) -> Option<time::Interval> {
+    if !settings.auto_scan || settings.scan_interval == 0 {
+        return None;
+    }
+    let period = Duration::from_secs(settings.scan_interval);
+    let mut timer = time::interval_at(time::Instant::now() + period, period);
+    timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    Some(timer)
+}
+
+/// Wait for the next tick of `timer`, or forever when there is none.
+async fn next_tick(timer: &mut Option<time::Interval>) {
+    match timer {
+        Some(timer) => {
+            timer.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Read terminal events on a thread of their own and hand them to the loop.
+///
+/// `event::read` blocks until there is input, so the event loop wakes only
+/// when something happens, instead of polling every 50 ms. The thread ends
+/// after a read error, or stays blocked in `read` until the process exits.
+fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<std::io::Result<Event>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        loop {
+            let event = event::read();
+            let failed = event.is_err();
+            if tx.send(event).is_err() || failed {
+                break;
             }
         }
-    };
-
-    // Terminal restore.
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    result
+    });
+    rx
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -153,6 +227,10 @@ pub struct App {
     pub vpn_import_prompt: Option<VpnImportPrompt>,
     /// Delete saved profile confirmation overlay.
     pub delete_confirm_prompt: Option<DeleteConfirmPrompt>,
+    /// NM's `LastScan` when the user asked for a scan; the scan is done when
+    /// it changes.
+    #[cfg(feature = "dbus")]
+    scan_pending: Option<i64>,
     /// SIM PIN unlock overlay for locked mobile broadband modems.
     #[cfg(feature = "mobile")]
     pub pin_unlock_prompt: Option<PinUnlockPrompt>,
@@ -205,12 +283,24 @@ impl PinUnlockPrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HiddenPromptField {
     Ssid,
+    Security,
     Password,
 }
+
+/// Security choices for a hidden network, in the order ←/→ cycles them.
+/// WEP and 802.1X can't be set up from the prompt (see
+/// `wifi_connection_settings`).
+pub const HIDDEN_SECURITY_CHOICES: [WifiSecurity; 4] = [
+    WifiSecurity::Wpa2,
+    WifiSecurity::Wpa3,
+    WifiSecurity::None,
+    WifiSecurity::Owe,
+];
 
 /// State for the hidden Wi-Fi connection modal.
 pub struct HiddenNetworkPrompt {
     pub ssid: TextInput,
+    pub security: WifiSecurity,
     pub password: TextInput,
     pub focused: HiddenPromptField,
     pub show_password: bool,
@@ -227,6 +317,7 @@ impl HiddenNetworkPrompt {
     pub fn new() -> Self {
         Self {
             ssid: TextInput::new(),
+            security: HIDDEN_SECURITY_CHOICES[0],
             password: TextInput::new(),
             focused: HiddenPromptField::Ssid,
             show_password: false,
@@ -234,18 +325,48 @@ impl HiddenNetworkPrompt {
         }
     }
 
-    fn focused_input_mut(&mut self) -> &mut TextInput {
+    /// The text field with focus; none while the security choice has it.
+    fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
         match self.focused {
-            HiddenPromptField::Ssid => &mut self.ssid,
-            HiddenPromptField::Password => &mut self.password,
+            HiddenPromptField::Ssid => Some(&mut self.ssid),
+            HiddenPromptField::Security => None,
+            HiddenPromptField::Password => Some(&mut self.password),
         }
     }
 
-    fn next_field(&mut self) {
-        self.focused = match self.focused {
-            HiddenPromptField::Ssid => HiddenPromptField::Password,
-            HiddenPromptField::Password => HiddenPromptField::Ssid,
+    /// The fields Tab moves through: no password for open and OWE networks.
+    fn fields(&self) -> &'static [HiddenPromptField] {
+        use HiddenPromptField::*;
+        if self.security.needs_password() {
+            &[Ssid, Security, Password]
+        } else {
+            &[Ssid, Security]
+        }
+    }
+
+    fn move_field(&mut self, forward: bool) {
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.focused).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % fields.len()
+        } else {
+            (at + fields.len() - 1) % fields.len()
         };
+        self.focused = fields[next];
+    }
+
+    fn cycle_security(&mut self, forward: bool) {
+        let choices = HIDDEN_SECURITY_CHOICES;
+        let at = choices
+            .iter()
+            .position(|s| *s == self.security)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % choices.len()
+        } else {
+            (at + choices.len() - 1) % choices.len()
+        };
+        self.security = choices[next];
     }
 }
 
@@ -723,6 +844,15 @@ impl ListItem {
     pub fn is_selectable(&self) -> bool {
         matches!(self, Self::Connection(_) | Self::HiddenWifiConnect)
     }
+
+    /// Identity of a selectable row across refreshes.
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Connection(c) => Some(&c.uuid),
+            Self::HiddenWifiConnect => Some(""),
+            Self::Header(_) => None,
+        }
+    }
 }
 
 /// Outcome of handling a key event.
@@ -781,6 +911,7 @@ impl App {
                         vpn_add_menu: None,
                         vpn_import_prompt: None,
                         delete_confirm_prompt: None,
+                        scan_pending: None,
                         #[cfg(feature = "mobile")]
                         pin_unlock_prompt: None,
                         nm: Some(nm),
@@ -813,6 +944,8 @@ impl App {
             vpn_add_menu: None,
             vpn_import_prompt: None,
             delete_confirm_prompt: None,
+            #[cfg(feature = "dbus")]
+            scan_pending: None,
             #[cfg(feature = "mobile")]
             pin_unlock_prompt: None,
             #[cfg(feature = "dbus")]
@@ -828,8 +961,39 @@ impl App {
                 }
             },
         };
-        app.items = demo_connections();
+        app.set_items(demo_connections());
         app
+    }
+
+    /// Carry out an action returned by `handle_key` (anything but `Quit`).
+    async fn perform(&mut self, action: Action) {
+        match action {
+            Action::Quit | Action::Continue => {}
+            Action::Activate(uuid) => self.on_activate(&uuid).await,
+            Action::Deactivate(uuid) => self.on_deactivate(&uuid).await,
+            Action::Scan => self.on_scan().await,
+            Action::ToggleNetworking => self.on_toggle_networking().await,
+            Action::ToggleWireless => self.on_toggle_wireless().await,
+            Action::ConnectUnsaved {
+                ssid,
+                security,
+                password,
+                hidden,
+            } => {
+                self.on_connect_unsaved(ssid, security, password, hidden)
+                    .await
+            }
+            Action::EditConnection(uuid) => self.on_edit_connection(uuid).await,
+            Action::SaveConnection => self.on_save_connection().await,
+            Action::ImportVpn {
+                plugin_name,
+                path,
+                activate,
+            } => self.on_import_vpn(plugin_name, path, activate).await,
+            Action::DeleteConnection(uuid) => self.on_delete_connection(uuid).await,
+            #[cfg(feature = "mobile")]
+            Action::UnlockSim { pin } => self.on_unlock_sim(pin).await,
+        }
     }
 
     #[instrument(skip(self))]
@@ -844,11 +1008,13 @@ impl App {
             self.networking_enabled = nm.networking_enabled().await.unwrap_or(true);
             self.wireless_enabled = nm.wireless_enabled().await.unwrap_or(true);
             let connections = nm.connections().await?;
-            self.items = build_list_items(connections);
-            // Keep selection in bounds after refresh.
-            let conn_count = self.items.iter().filter(|i| i.is_selectable()).count();
-            if conn_count > 0 {
-                self.selected = self.selected.min(conn_count - 1);
+            let last_scan = match self.scan_pending {
+                Some(_) => Some(nm.last_scan().await.ok()),
+                None => None,
+            };
+            self.set_items(build_list_items(connections));
+            if let Some(last_scan) = last_scan {
+                self.note_last_scan(last_scan);
             }
             debug!(state = ?self.nm_state, items = self.items.len(), "refreshed");
             #[cfg(feature = "mobile")]
@@ -856,6 +1022,29 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Replace the list, keeping the selection on the same entry.
+    ///
+    /// Every refresh re-sorts Wi-Fi by signal strength, so the entry at the
+    /// selected position changes; Enter or `d` must act on the one the user
+    /// picked. When that entry is gone, the position is kept (clamped).
+    fn set_items(&mut self, items: Vec<ListItem>) {
+        let key = self
+            .selected_list_item()
+            .and_then(ListItem::key)
+            .map(str::to_owned);
+        self.items = items;
+        let selectable: Vec<&ListItem> = self.items.iter().filter(|i| i.is_selectable()).collect();
+        let found = key.and_then(|key| {
+            selectable
+                .iter()
+                .position(|i| i.key() == Some(key.as_str()))
+        });
+        self.selected = match found {
+            Some(idx) => idx,
+            None => self.selected.min(selectable.len().saturating_sub(1)),
+        };
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Action {
@@ -904,7 +1093,7 @@ impl App {
                     self.status_message = Some("Wi-Fi is disabled.".into());
                     return Action::Continue;
                 }
-                self.status_message = Some("Scanning…".into());
+                self.status_message = Some(SCANNING.into());
                 return Action::Scan;
             }
             KeyCode::Char('n') => return Action::ToggleNetworking,
@@ -1132,7 +1321,12 @@ impl App {
                 Some(Action::Continue)
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                prompt.next_field();
+                prompt.move_field(code == KeyCode::Tab);
+                Some(Action::Continue)
+            }
+            KeyCode::Left | KeyCode::Right if prompt.focused == HiddenPromptField::Security => {
+                prompt.cycle_security(code == KeyCode::Right);
+                prompt.error = None;
                 Some(Action::Continue)
             }
             KeyCode::Enter => {
@@ -1142,20 +1336,25 @@ impl App {
                     prompt.focused = HiddenPromptField::Ssid;
                     return Some(Action::Continue);
                 }
-                let password = prompt.password.text().to_owned();
-                let security = if password.is_empty() {
-                    WifiSecurity::None
+                let security = prompt.security;
+                let password = if security.needs_password() {
+                    let password = prompt.password.text().to_owned();
+                    if password.is_empty() {
+                        prompt.error = Some(format!(
+                            "{} needs a password; ←/→ on Security for Open or OWE.",
+                            security.label()
+                        ));
+                        prompt.focused = HiddenPromptField::Password;
+                        return Some(Action::Continue);
+                    }
+                    Some(password)
                 } else {
-                    WifiSecurity::Wpa2
+                    None
                 };
                 Some(Action::ConnectUnsaved {
                     ssid,
                     security,
-                    password: if password.is_empty() {
-                        None
-                    } else {
-                        Some(password)
-                    },
+                    password,
                     hidden: true,
                 })
             }
@@ -1166,7 +1365,9 @@ impl App {
                 Some(Action::Continue)
             }
             _ => {
-                if prompt.focused_input_mut().handle_key(code, modifiers) {
+                if let Some(input) = prompt.focused_input_mut()
+                    && input.handle_key(code, modifiers)
+                {
                     prompt.error = None;
                 }
                 Some(Action::Continue)
@@ -1183,13 +1384,13 @@ impl App {
                 Some(Action::Continue)
             }
             KeyCode::Enter => {
-                if prompt.security.is_secured() && prompt.input.is_empty() {
+                if prompt.security.needs_password() && prompt.input.is_empty() {
                     prompt.error = Some("Password is required.".into());
                     return Some(Action::Continue);
                 }
                 let ssid = prompt.ssid.clone();
                 let security = prompt.security;
-                let password = if prompt.security.is_secured() {
+                let password = if prompt.security.needs_password() {
                     Some(prompt.input.text().to_owned())
                 } else {
                     None
@@ -1243,6 +1444,10 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        // Every input is one line: a copied password or path often ends in
+        // a newline, which would otherwise become part of it.
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        let text = text.as_str();
         if let Some(prompt) = &mut self.vpn_import_prompt {
             prompt.path.insert_str(text);
             prompt.error = None;
@@ -1256,8 +1461,10 @@ impl App {
             return;
         }
         if let Some(prompt) = &mut self.hidden_network_prompt {
-            prompt.focused_input_mut().insert_str(text);
-            prompt.error = None;
+            if let Some(input) = prompt.focused_input_mut() {
+                input.insert_str(text);
+                prompt.error = None;
+            }
             return;
         }
         if let Some(prompt) = &mut self.password_prompt {
@@ -1348,7 +1555,7 @@ impl App {
                 ));
                 return Action::Continue;
             }
-            if wifi.security.is_secured() {
+            if wifi.security.needs_password() {
                 self.password_prompt = Some(PasswordPrompt::new(wifi.ssid.clone(), wifi.security));
                 return Action::Continue;
             }
@@ -1551,8 +1758,14 @@ impl App {
     }
 
     fn open_vpn_add_menu(&mut self) {
-        let mut plugins = libnetman::vpn_plugins::list_installed_plugins();
-        if plugins.is_empty() {
+        self.open_vpn_add_menu_with(libnetman::vpn_plugins::list_installed_plugins());
+    }
+
+    /// Open the VPN menu for `plugins`, the installed NM VPN plugins. Only
+    /// demo mode fills an empty list with a sample entry: outside it, a
+    /// plugin that isn't installed can't create a working connection.
+    fn open_vpn_add_menu_with(&mut self, mut plugins: Vec<libnetman::vpn_plugins::VpnPluginInfo>) {
+        if plugins.is_empty() && self.demo_mode {
             plugins = demo_vpn_plugins();
         }
         if plugins.is_empty() {
@@ -1704,14 +1917,32 @@ impl App {
         } else {
             #[cfg(feature = "dbus")]
             if let Some(nm) = &self.nm {
+                // Don't wait for the scan: refreshes pick up new networks, and
+                // the status clears once NM's LastScan moves.
+                let before = nm.last_scan().await.unwrap_or(-1);
                 match nm.request_wifi_scan().await {
-                    Ok(()) => match self.refresh().await {
-                        Ok(()) => self.status_message = None,
-                        Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
-                    },
+                    Ok(()) => self.scan_pending = Some(before),
                     Err(e) => self.status_message = Some(format!("Scan failed: {e}")),
                 }
             }
+        }
+    }
+
+    /// Whether a periodic scan makes sense now: NM is live and Wi-Fi is on.
+    #[cfg(feature = "dbus")]
+    fn wants_auto_scan(&self) -> bool {
+        !self.demo_mode && self.networking_enabled && self.wireless_enabled
+    }
+
+    /// A periodic scan: no status message, and a refused request (NM rate
+    /// limits scans) is only logged.
+    async fn on_auto_scan(&mut self) {
+        #[cfg(feature = "dbus")]
+        if self.wants_auto_scan()
+            && let Some(nm) = &self.nm
+            && let Err(e) = nm.request_wifi_scan().await
+        {
+            debug!(error = %e, "automatic scan not started");
         }
     }
 
@@ -1822,6 +2053,22 @@ impl App {
         nm.deactivate(uuid).await
     }
 
+    #[cfg(feature = "dbus")]
+    /// Finish a requested scan once NM's `LastScan` differs from the value at
+    /// the request (or can't be read, as on NM before 1.12).
+    fn note_last_scan(&mut self, last_scan: Option<i64>) {
+        let Some(before) = self.scan_pending else {
+            return;
+        };
+        if last_scan.is_some_and(|now| now == before) {
+            return;
+        }
+        self.scan_pending = None;
+        if self.status_message.as_deref() == Some(SCANNING) {
+            self.status_message = None;
+        }
+    }
+
     fn clear_inflight_status(&mut self) {
         if self
             .status_message
@@ -1832,6 +2079,9 @@ impl App {
         }
     }
 }
+
+/// Status shown while a requested Wi-Fi scan runs.
+const SCANNING: &str = "Scanning…";
 
 /// Returns `true` for transient connect/disconnect status messages.
 fn is_inflight_status(message: &str) -> bool {

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use zbus::{OwnedObjectPath, OwnedVariant, proxy};
+use zbus::{ObjectPath, OwnedObjectPath, OwnedVariant, proxy};
 
 // ── org.freedesktop.NetworkManager ───────────────────────────────────────────
 
@@ -36,8 +36,8 @@ pub trait NetworkManager {
     #[zbus(property)]
     fn networking_enabled(&self) -> zbus::Result<bool>;
 
-    #[zbus(property)]
-    fn set_networking_enabled(&self, value: bool) -> zbus::Result<()>;
+    /// Enable or disable networking; `NetworkingEnabled` itself is read-only.
+    fn enable(&self, enable: bool) -> zbus::Result<()>;
 
     /// Whether Wi-Fi radio is enabled.
     #[zbus(property)]
@@ -49,20 +49,20 @@ pub trait NetworkManager {
     /// Activate a previously saved connection on a device.
     fn activate_connection(
         &self,
-        connection: &str,
-        device: &str,
-        specific_object: &str,
+        connection: &ObjectPath<'_>,
+        device: &ObjectPath<'_>,
+        specific_object: &ObjectPath<'_>,
     ) -> zbus::Result<OwnedObjectPath>;
 
     /// Deactivate an active connection.
-    fn deactivate_connection(&self, active_connection: &str) -> zbus::Result<()>;
+    fn deactivate_connection(&self, active_connection: &ObjectPath<'_>) -> zbus::Result<()>;
 
     /// Add a new connection from settings and activate it immediately.
     fn add_and_activate_connection(
         &self,
         connection: HashMap<String, HashMap<String, OwnedVariant>>,
-        device: &str,
-        specific_object: &str,
+        device: &ObjectPath<'_>,
+        specific_object: &ObjectPath<'_>,
     ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
@@ -108,11 +108,8 @@ pub trait SettingsConnection {
         &self,
         settings: HashMap<String, HashMap<String, OwnedVariant>>,
         flags: u32,
-    ) -> zbus::Result<(
-        HashMap<String, HashMap<String, OwnedVariant>>,
-        HashMap<String, OwnedVariant>,
-        HashMap<String, OwnedVariant>,
-    )>;
+        args: HashMap<String, OwnedVariant>,
+    ) -> zbus::Result<HashMap<String, OwnedVariant>>;
 
     /// Remove this connection profile from NetworkManager.
     fn delete(&self) -> zbus::Result<()>;
@@ -164,6 +161,11 @@ pub trait Device {
     /// Current device state (NMDeviceState as u32).
     #[zbus(property)]
     fn state(&self) -> zbus::Result<u32>;
+
+    /// Identifier of the backing service's object; for a modem, its
+    /// ModemManager object path.
+    #[zbus(property)]
+    fn udi(&self) -> zbus::Result<String>;
 }
 
 // ── org.freedesktop.NetworkManager.Device.Wireless ───────────────────────────
@@ -178,6 +180,10 @@ pub trait DeviceWireless {
 
     /// All access points visible to this device.
     fn get_all_access_points(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
+
+    /// CLOCK_BOOTTIME milliseconds of the last finished scan; -1 if never.
+    #[zbus(property)]
+    fn last_scan(&self) -> zbus::Result<i64>;
 }
 
 // ── org.freedesktop.NetworkManager.AccessPoint ───────────────────────────────
@@ -251,9 +257,9 @@ pub trait Ip6Config {
     #[zbus(property)]
     fn gateway(&self) -> zbus::Result<String>;
 
-    /// List of nameserver data maps (key: `address`).
+    /// DNS servers as 16-byte addresses (IP6Config has no `NameserverData`).
     #[zbus(property)]
-    fn nameserver_data(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
+    fn nameservers(&self) -> zbus::Result<Vec<Vec<u8>>>;
 }
 
 // ── org.freedesktop.NetworkManager.Device.Modem ───────────────────────────────
@@ -272,7 +278,8 @@ pub trait DeviceModem {
     #[zbus(property)]
     fn current_capabilities(&self) -> zbus::Result<u32>;
 
-    /// ModemManager device ID (object path since NM 1.20).
+    /// ModemManager's opaque device identifier (not an object path; the
+    /// ModemManager object is the device's `Udi`).
     #[zbus(property)]
     fn device_id(&self) -> zbus::Result<String>;
 

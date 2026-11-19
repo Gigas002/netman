@@ -158,12 +158,6 @@ fn render_key_hints(frame: &mut Frame, area: Rect, app: &App) {
 // ── Help overlay ──────────────────────────────────────────────────────────────
 
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
-    let width = 52u16.min(area.width.saturating_sub(4));
-    let height = 20u16.min(area.height.saturating_sub(4));
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let overlay = Rect::new(x, y, width, height);
-
     let help_lines = vec![
         Line::from(Span::styled(
             "  netman — Help",
@@ -205,6 +199,14 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::raw("  q           Quit netman"),
         Line::raw("  Ctrl+C      Force quit"),
     ];
+
+    // Tall enough for every line plus the border, when the terminal is.
+    let width = 52u16.min(area.width.saturating_sub(4));
+    let wanted = u16::try_from(help_lines.len() + 2).unwrap_or(u16::MAX);
+    let height = wanted.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let overlay = Rect::new(x, y, width, height);
 
     frame.render_widget(Clear, overlay);
     frame.render_widget(

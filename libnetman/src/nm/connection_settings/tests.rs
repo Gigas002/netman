@@ -237,3 +237,25 @@ fn profile_to_settings_rejects_secured_wifi_without_password() {
     });
     assert!(profile_to_settings(&profile).is_err());
 }
+
+#[test]
+fn owe_profile_parses_and_saves_without_a_password() {
+    let mut raw = wifi_raw();
+    let sec = raw.get_mut("802-11-wireless-security").unwrap();
+    sec.insert("key-mgmt".into(), str_value("owe"));
+    sec.remove("psk");
+
+    let profile = parse_profile(&raw, None);
+    let ConnectionProfile::Wifi(w) = &profile else {
+        panic!("expected wifi profile");
+    };
+    assert_eq!(w.security, WifiSecurity::Owe);
+
+    let saved = apply_profile(&raw, &profile).expect("apply");
+    let sec = saved.get("802-11-wireless-security").unwrap();
+    assert_eq!(
+        <&str>::try_from(sec.get("key-mgmt").unwrap()).unwrap(),
+        "owe"
+    );
+    assert!(!sec.contains_key("psk"));
+}

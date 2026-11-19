@@ -57,3 +57,17 @@ fn wpa3_uses_sae_key_mgmt() {
 fn enterprise_is_rejected() {
     assert!(wifi_connection_settings("Corp", WifiSecurity::Enterprise, Some("x"), false).is_err());
 }
+
+#[test]
+fn owe_network_needs_no_password() {
+    let settings = wifi_connection_settings("Enhanced-Open", WifiSecurity::Owe, None, false)
+        .expect("OWE settings");
+    let sec = settings
+        .get("802-11-wireless-security")
+        .expect("security section");
+    assert_eq!(
+        <&str>::try_from(sec.get("key-mgmt").unwrap()).unwrap(),
+        "owe"
+    );
+    assert!(!sec.contains_key("psk"));
+}

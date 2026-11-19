@@ -22,3 +22,20 @@ fn init_with_log_file_creates_file() {
     // open path must not panic.
     assert!(log_path.exists() || !log_path.exists()); // no-op; just ensure no panic.
 }
+
+#[test]
+fn gated_writer_drops_output_while_the_gate_is_set() {
+    static GATE: AtomicBool = AtomicBool::new(false);
+    let mut w = Gated {
+        gate: &GATE,
+        inner: Vec::new(),
+    };
+
+    w.write_all(b"before ").unwrap();
+    GATE.store(true, Ordering::Relaxed);
+    w.write_all(b"during ").unwrap();
+    GATE.store(false, Ordering::Relaxed);
+    w.write_all(b"after").unwrap();
+
+    assert_eq!(w.inner, b"before after");
+}

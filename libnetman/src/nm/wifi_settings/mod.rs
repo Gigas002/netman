@@ -31,7 +31,7 @@ pub fn wifi_connection_settings(
                 "WEP networks are not supported here".into(),
             ));
         }
-        WifiSecurity::None => {}
+        WifiSecurity::None | WifiSecurity::Owe => {}
         WifiSecurity::Wpa | WifiSecurity::Wpa2 | WifiSecurity::Wpa3 => {
             if password.is_none_or(str::is_empty) {
                 return Err(Error::OperationFailed(
@@ -58,9 +58,11 @@ pub fn wifi_connection_settings(
     settings.insert("802-11-wireless".into(), wireless);
 
     if security.is_secured() {
-        let psk = password.expect("validated above");
         let mut sec = HashMap::new();
         match security {
+            WifiSecurity::Owe => {
+                sec.insert("key-mgmt".into(), str_value("owe"));
+            }
             WifiSecurity::Wpa3 => {
                 sec.insert("key-mgmt".into(), str_value("sae"));
             }
@@ -70,7 +72,10 @@ pub fn wifi_connection_settings(
             }
             _ => unreachable!(),
         }
-        sec.insert("psk".into(), str_value(psk));
+        if security.needs_password() {
+            let psk = password.expect("validated above");
+            sec.insert("psk".into(), str_value(psk));
+        }
         settings.insert("802-11-wireless-security".into(), sec);
     }
 

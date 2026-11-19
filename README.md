@@ -88,4 +88,5 @@ Options:
 
 In modals (password prompt, connection editor, etc.): `Esc` cancels, `Enter`
 confirms, `Tab` / `Shift+Tab` moves between fields. Password fields support
-`Ctrl+H` to show/hide and `Ctrl+V` to paste.
+`Ctrl+H` to show/hide. Paste with your terminal's paste shortcut (often
+`Ctrl+Shift+V`); a pasted line break is dropped rather than submitting the form.

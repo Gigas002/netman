@@ -114,10 +114,15 @@ impl WifiInfo {
         format!("{filled}{empty}")
     }
 
-    /// Frequency band label: "2.4 GHz" or "5 GHz".
+    /// Frequency band label: "2.4 GHz", "5 GHz", "6 GHz" or "60 GHz".
     pub fn band_label(&self) -> Option<&'static str> {
-        self.frequency
-            .map(|f| if f < 3000 { "2.4 GHz" } else { "5 GHz" })
+        match self.frequency? {
+            2400..=2500 => Some("2.4 GHz"),
+            4900..=5924 => Some("5 GHz"),
+            5925..=7125 => Some("6 GHz"),
+            57000..=71000 => Some("60 GHz"),
+            _ => None,
+        }
     }
 }
 
@@ -129,6 +134,8 @@ pub enum WifiSecurity {
     Wpa,
     Wpa2,
     Wpa3,
+    /// Opportunistic Wireless Encryption ("Enhanced Open"): encrypted, no password.
+    Owe,
     Enterprise,
 }
 
@@ -140,12 +147,19 @@ impl WifiSecurity {
             Self::Wpa => "WPA",
             Self::Wpa2 => "WPA2",
             Self::Wpa3 => "WPA3",
+            Self::Owe => "OWE",
             Self::Enterprise => "802.1X",
         }
     }
 
+    /// Whether traffic is encrypted.
     pub fn is_secured(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Whether connecting asks for a password (OWE is encrypted but has none).
+    pub fn needs_password(self) -> bool {
+        matches!(self, Self::Wep | Self::Wpa | Self::Wpa2 | Self::Wpa3)
     }
 
     /// Security modes the connection editor allows cycling through.

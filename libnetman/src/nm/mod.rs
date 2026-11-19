@@ -15,11 +15,10 @@ mod wifi_settings;
 use crate::vpn_plugins;
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use tracing::{debug, instrument, warn};
 use zbus::Connection;
-use zbus::OwnedVariant;
+use zbus::{ObjectPath, OwnedVariant};
 
 use crate::{
     Result,
@@ -30,14 +29,44 @@ use crate::{
     },
     error::Error,
 };
-use connection_settings::{UPDATE2_TO_DISK, apply_profile, parse_profile, profile_to_settings};
-use proxies::{
-    AccessPointProxy, ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, Ip4ConfigProxy,
-    Ip6ConfigProxy, NetworkManagerProxy, SettingsConnectionProxy, SettingsProxy,
+use connection_settings::{
+    UPDATE2_TO_DISK, apply_profile, detect_wifi_security, parse_profile, profile_to_settings,
 };
+use proxies::{
+    ActiveConnectionProxy, DeviceProxy, DeviceWirelessProxy, NetworkManagerProxy,
+    SettingsConnectionProxy, SettingsProxy,
+};
+
+/// The "no object" path NM takes for an optional object argument.
+const NO_OBJECT: ObjectPath<'static> = ObjectPath::from_static_str_unchecked("/");
 
 /// NM device type constant for Wi-Fi adapters.
 const DEVICE_TYPE_WIFI: u32 = 2;
+
+const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
+
+/// A proxy builder that doesn't cache properties.
+///
+/// A caching proxy, zbus' default, subscribes to `PropertiesChanged` and
+/// fetches every property on first use: on a bus that is GetNameOwner,
+/// AddMatch and GetAll, and RemoveMatch when it is dropped. NmClient's proxies
+/// live for one call, so that was most of the D-Bus traffic of a refresh.
+/// Objects with several properties are read with one `GetAll` (`get_all`).
+pub(crate) fn uncached<'a, T>(conn: &Connection) -> zbus::proxy::Builder<'a, T>
+where
+    T: zbus::proxy::Defaults,
+{
+    zbus::proxy::Builder::new(conn).cache_properties(zbus::proxy::CacheProperties::No)
+}
+
+/// All properties of one interface of an NM object, from a single `GetAll`.
+struct Props(HashMap<String, OwnedVariant>);
+
+impl Props {
+    fn get<T: TryFrom<OwnedVariant>>(&self, name: &str) -> Option<T> {
+        T::try_from(self.0.get(name)?.try_clone().ok()?).ok()
+    }
+}
 
 /// High-level client for the NetworkManager D-Bus service.
 pub struct NmClient {
@@ -51,78 +80,104 @@ impl NmClient {
         let conn = Connection::system()
             .await
             .map_err(|e| Error::DBus(format!("system bus: {e}")))?;
+        Self::with_connection(conn).await
+    }
 
+    /// Use an existing D-Bus connection instead of the system bus, and verify
+    /// NetworkManager answers on it.
+    ///
+    /// This is for a private bus or a peer-to-peer link to a test double;
+    /// [`NmClient::connect`] is the normal entry point.
+    pub async fn with_connection(conn: Connection) -> Result<Self> {
+        let client = Self { conn };
         // Ping NM to confirm it's running.
-        let nm = NetworkManagerProxy::new(&conn).await?;
-        let _ = nm.state().await?;
+        client.state().await?;
 
         debug!("connected to NetworkManager");
-        Ok(Self { conn })
+        Ok(client)
+    }
+
+    async fn nm(&self) -> Result<NetworkManagerProxy<'static>> {
+        Ok(uncached(&self.conn).build().await?)
+    }
+
+    async fn settings(&self) -> Result<SettingsProxy<'static>> {
+        Ok(uncached(&self.conn).build().await?)
+    }
+
+    async fn get_all(&self, path: &ObjectPath<'_>, interface: &'static str) -> Result<Props> {
+        let proxy = uncached::<zbus::fdo::PropertiesProxy>(&self.conn)
+            .destination(NM_SERVICE)
+            .path(path.to_owned())
+            .build()
+            .await?;
+        let interface = zbus::names::InterfaceName::from_static_str_unchecked(interface);
+        Ok(Props(proxy.get_all(interface).await?))
     }
 
     /// Returns the current overall NM connectivity state.
     pub async fn state(&self) -> Result<NmState> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         let raw = nm.state().await?;
         Ok(NmState::from_u32(raw))
     }
 
     /// Returns the internet connectivity check result.
     pub async fn connectivity(&self) -> Result<ConnectivityState> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         let raw = nm.connectivity().await?;
         Ok(ConnectivityState::from_u32(raw))
     }
 
     /// Returns whether NM has networking enabled (all devices).
     pub async fn networking_enabled(&self) -> Result<bool> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         nm.networking_enabled().await.map_err(Error::from)
     }
 
     /// Returns whether the Wi-Fi radio is enabled.
     pub async fn wireless_enabled(&self) -> Result<bool> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         nm.wireless_enabled().await.map_err(Error::from)
     }
 
     /// Enable or disable networking for all devices.
     pub async fn set_networking_enabled(&self, enabled: bool) -> Result<()> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.set_networking_enabled(enabled).await?;
+        let nm = self.nm().await?;
+        nm.enable(enabled).await?;
         Ok(())
     }
 
     /// Enable or disable the Wi-Fi radio.
     pub async fn set_wireless_enabled(&self, enabled: bool) -> Result<()> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         nm.set_wireless_enabled(enabled).await?;
         Ok(())
     }
 
     /// Returns all connections known to NetworkManager (saved profiles + active).
     pub async fn connections(&self) -> Result<Vec<NmConn>> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
+        let settings = self.settings().await?;
 
         let active_paths = nm.active_connections().await?;
         let saved_paths = settings.list_connections().await?;
 
-        let mut active_proxies: Vec<ActiveConnectionProxy> = Vec::new();
+        // Read each active connection once, keyed by profile UUID.
+        let mut active = HashMap::new();
         for p in &active_paths {
-            if let Ok(proxy) = ActiveConnectionProxy::builder(&self.conn)
-                .path(p.as_str())
-                .build()
-                .await
-            {
-                active_proxies.push(proxy);
+            match self.active_info(p).await {
+                Ok((uuid, info)) => {
+                    active.insert(uuid, info);
+                }
+                Err(e) => warn!(path = ?p, error = %e, "skipping active connection"),
             }
         }
 
         let mut results = Vec::new();
 
         for path in &saved_paths {
-            match self.build_connection(path, &active_proxies).await {
+            match self.build_connection(path, &mut active).await {
                 Ok(conn) => results.push(conn),
                 Err(e) => warn!(?path, error = %e, "skipping connection"),
             }
@@ -149,25 +204,39 @@ impl NmClient {
         Ok(results)
     }
 
-    /// Request a Wi-Fi scan on the first wireless device and wait briefly for results.
+    /// Request a Wi-Fi scan on the first wireless device.
+    ///
+    /// Returns as soon as NM accepts the request; NM scans in the background,
+    /// updates the access-point list, and then advances
+    /// [`last_scan`](Self::last_scan).
     pub async fn request_wifi_scan(&self) -> Result<()> {
         let path = self.find_wireless_path().await?;
-        let wireless = DeviceWirelessProxy::builder(&self.conn)
+        let wireless = uncached::<DeviceWirelessProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
         wireless.request_scan(HashMap::new()).await?;
-        // NM completes the scan asynchronously; allow time before reading APs.
-        tokio::time::sleep(Duration::from_secs(2)).await;
         Ok(())
+    }
+
+    /// When the first wireless device last finished a scan (CLOCK_BOOTTIME
+    /// milliseconds; -1 if never). Compare values to see a scan finish.
+    pub async fn last_scan(&self) -> Result<i64> {
+        let path = self.find_wireless_path().await?;
+        let wireless = uncached::<DeviceWirelessProxy>(&self.conn)
+            .path(path.as_str())
+            .build()
+            .await?;
+        Ok(wireless.last_scan().await?)
     }
 
     /// Activate (connect) a saved connection profile.
     pub async fn activate(&self, uuid: &str) -> Result<()> {
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let settings = self.settings().await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.activate_connection(path.as_str(), "/", "/").await?;
+        let nm = self.nm().await?;
+        nm.activate_connection(&path, &NO_OBJECT, &NO_OBJECT)
+            .await?;
         Ok(())
     }
 
@@ -183,8 +252,8 @@ impl NmClient {
 
         let settings = wifi_connection_settings(ssid, security, password, hidden)?;
         let device = self.find_wireless_path().await?;
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
-        nm.add_and_activate_connection(settings, device.as_str(), "/")
+        let nm = self.nm().await?;
+        nm.add_and_activate_connection(settings, &device, &NO_OBJECT)
             .await?;
         Ok(())
     }
@@ -244,15 +313,15 @@ impl NmClient {
         uuid: &str,
         profile: &ConnectionProfile,
     ) -> Result<()> {
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let settings = self.settings().await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
         let (raw, _) = self.load_connection_settings(uuid).await?;
         let updated = apply_profile(&raw, profile)?;
-        let sc = SettingsConnectionProxy::builder(&self.conn)
+        let sc = uncached::<SettingsConnectionProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
-        sc.update2(updated, UPDATE2_TO_DISK).await?;
+        sc.update2(updated, UPDATE2_TO_DISK, HashMap::new()).await?;
         Ok(())
     }
 
@@ -266,9 +335,9 @@ impl NmClient {
         activate: bool,
     ) -> Result<String> {
         let settings = profile_to_settings(profile)?;
-        let nm_settings = SettingsProxy::new(&self.conn).await?;
+        let nm_settings = self.settings().await?;
         let path = nm_settings.add_connection(settings).await?;
-        let sc = SettingsConnectionProxy::builder(&self.conn)
+        let sc = uncached::<SettingsConnectionProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -323,9 +392,9 @@ impl NmClient {
 
     /// Delete a saved connection profile via `SettingsConnection::Delete`.
     pub async fn delete_connection(&self, uuid: &str) -> Result<()> {
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let settings = self.settings().await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
-        let sc = SettingsConnectionProxy::builder(&self.conn)
+        let sc = uncached::<SettingsConnectionProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -335,16 +404,16 @@ impl NmClient {
 
     /// Deactivate (disconnect) an active connection by UUID.
     pub async fn deactivate(&self, uuid: &str) -> Result<()> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         let active_paths = nm.active_connections().await?;
 
         for p in &active_paths {
-            let proxy = ActiveConnectionProxy::builder(&self.conn)
+            let proxy = uncached::<ActiveConnectionProxy>(&self.conn)
                 .path(p.as_str())
                 .build()
                 .await?;
             if proxy.uuid().await? == uuid {
-                nm.deactivate_connection(p.as_str()).await?;
+                nm.deactivate_connection(p).await?;
                 return Ok(());
             }
         }
@@ -360,9 +429,9 @@ impl NmClient {
         HashMap<String, HashMap<String, OwnedVariant>>,
         Option<HashMap<String, HashMap<String, OwnedVariant>>>,
     )> {
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let settings = self.settings().await?;
         let path = settings.get_connection_by_uuid(uuid).await?;
-        let sc = SettingsConnectionProxy::builder(&self.conn)
+        let sc = uncached::<SettingsConnectionProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -402,9 +471,9 @@ impl NmClient {
             ));
         };
 
-        let settings = SettingsProxy::new(&self.conn).await?;
+        let settings = self.settings().await?;
         for path in settings.list_connections().await? {
-            let sc = SettingsConnectionProxy::builder(&self.conn)
+            let sc = uncached::<SettingsConnectionProxy>(&self.conn)
                 .path(path.as_str())
                 .build()
                 .await?;
@@ -424,9 +493,9 @@ impl NmClient {
     async fn build_connection(
         &self,
         path: &zbus::OwnedObjectPath,
-        active_proxies: &[ActiveConnectionProxy<'_>],
+        active: &mut HashMap<String, ActiveInfo>,
     ) -> Result<NmConn> {
-        let sc = SettingsConnectionProxy::builder(&self.conn)
+        let sc = uncached::<SettingsConnectionProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -437,92 +506,99 @@ impl NmClient {
         let uuid = get_str_field(&raw, "connection", "uuid").unwrap_or_default();
         let conn_type = get_str_field(&raw, "connection", "type").unwrap_or_default();
 
-        let (status, device_name, ip4, ip6) =
-            self.active_info_for_uuid(&uuid, active_proxies).await;
-
+        let info = active.remove(&uuid).unwrap_or_default();
         let kind = self.build_kind(&conn_type, &raw).await;
 
         Ok(NmConn {
             id,
             uuid,
             kind,
-            status,
-            ip4,
-            ip6,
-            device: device_name,
+            status: info.status,
+            ip4: info.ip4,
+            ip6: info.ip6,
+            device: info.device,
             saved: true,
         })
     }
 
-    async fn active_info_for_uuid(
-        &self,
-        uuid: &str,
-        active_proxies: &[ActiveConnectionProxy<'_>],
-    ) -> (
-        ConnectionStatus,
-        Option<String>,
-        Option<Ip4Config>,
-        Option<Ip6Config>,
-    ) {
-        for proxy in active_proxies {
-            let Ok(u) = proxy.uuid().await else { continue };
-            if u != uuid {
-                continue;
-            }
-            let state = proxy.state().await.unwrap_or(0);
-            let status = match state {
-                1 => ConnectionStatus::Activating,
-                2 => ConnectionStatus::Active,
-                3 => ConnectionStatus::Deactivating,
-                _ => ConnectionStatus::Unknown,
-            };
+    /// Profile UUID and live details of one active connection.
+    async fn active_info(&self, path: &ObjectPath<'_>) -> Result<(String, ActiveInfo)> {
+        let props = self
+            .get_all(path, "org.freedesktop.NetworkManager.Connection.Active")
+            .await?;
+        let uuid: String = props
+            .get("Uuid")
+            .ok_or_else(|| Error::DBus(format!("{path}: no Uuid")))?;
+        let status = match props.get::<u32>("State").unwrap_or(0) {
+            1 => ConnectionStatus::Activating,
+            2 => ConnectionStatus::Active,
+            3 => ConnectionStatus::Deactivating,
+            _ => ConnectionStatus::Unknown,
+        };
 
-            let device_name = self.first_device_name(proxy).await;
-            let ip4 = self.ip4_config(proxy).await;
-            let ip6 = self.ip6_config(proxy).await;
+        let devices: Vec<zbus::OwnedObjectPath> = props.get("Devices").unwrap_or_default();
+        let device = match devices.first() {
+            Some(dev) => self.device_interface(dev).await,
+            None => None,
+        };
+        let ip4 = match props.get::<zbus::OwnedObjectPath>("Ip4Config") {
+            Some(p) if p.as_str() != "/" => self.ip4_config(&p).await,
+            _ => None,
+        };
+        let ip6 = match props.get::<zbus::OwnedObjectPath>("Ip6Config") {
+            Some(p) if p.as_str() != "/" => self.ip6_config(&p).await,
+            _ => None,
+        };
 
-            return (status, device_name, ip4, ip6);
-        }
-        (ConnectionStatus::Inactive, None, None, None)
+        Ok((
+            uuid,
+            ActiveInfo {
+                status,
+                device,
+                ip4,
+                ip6,
+            },
+        ))
     }
 
-    async fn first_device_name(&self, active: &ActiveConnectionProxy<'_>) -> Option<String> {
-        let paths = active.devices().await.ok()?;
-        let path = paths.first()?;
-        let dev = DeviceProxy::builder(&self.conn)
-            .path(path.as_str())
+    async fn device_interface(&self, path: &ObjectPath<'_>) -> Option<String> {
+        let dev = uncached::<DeviceProxy>(&self.conn)
+            .path(path.to_owned())
             .build()
             .await
             .ok()?;
         dev.interface().await.ok()
     }
 
-    async fn ip4_config(&self, active: &ActiveConnectionProxy<'_>) -> Option<Ip4Config> {
-        let path = active.ip4_config().await.ok()?;
-        if path.as_str() == "/" {
-            return None;
-        }
-        let cfg = Ip4ConfigProxy::builder(&self.conn)
-            .path(path.as_str())
-            .build()
+    async fn ip4_config(&self, path: &ObjectPath<'_>) -> Option<Ip4Config> {
+        let props = self
+            .get_all(path, "org.freedesktop.NetworkManager.IP4Config")
             .await
             .ok()?;
-
-        parse_ip4_config(&cfg).await
+        let addresses: Vec<HashMap<String, OwnedVariant>> = props.get("AddressData")?;
+        let nameservers: Vec<HashMap<String, OwnedVariant>> =
+            props.get("NameserverData").unwrap_or_default();
+        Some(Ip4Config {
+            address: parse_live_ip_config(&addresses, 24)?,
+            gateway: props.get::<String>("Gateway").filter(|g| !g.is_empty()),
+            nameservers: nameservers
+                .iter()
+                .filter_map(|ns| get_str_value(ns, "address"))
+                .collect(),
+        })
     }
 
-    async fn ip6_config(&self, active: &ActiveConnectionProxy<'_>) -> Option<Ip6Config> {
-        let path = active.ip6_config().await.ok()?;
-        if path.as_str() == "/" {
-            return None;
-        }
-        let cfg = Ip6ConfigProxy::builder(&self.conn)
-            .path(path.as_str())
-            .build()
+    async fn ip6_config(&self, path: &ObjectPath<'_>) -> Option<Ip6Config> {
+        let props = self
+            .get_all(path, "org.freedesktop.NetworkManager.IP6Config")
             .await
             .ok()?;
-
-        parse_ip6_config(&cfg).await
+        let addresses: Vec<HashMap<String, OwnedVariant>> = props.get("AddressData")?;
+        Some(Ip6Config {
+            address: parse_live_ip_config(&addresses, 64)?,
+            gateway: props.get::<String>("Gateway").filter(|g| !g.is_empty()),
+            nameservers: ipv6_nameservers(props.get("Nameservers").unwrap_or_default()),
+        })
     }
 
     async fn build_kind(
@@ -567,7 +643,7 @@ impl NmClient {
             })
             .unwrap_or(WifiMode::Infrastructure);
 
-        let security = self.detect_wifi_security(raw);
+        let security = detect_wifi_security(raw);
 
         WifiInfo {
             ssid,
@@ -579,30 +655,10 @@ impl NmClient {
         }
     }
 
-    fn detect_wifi_security(
-        &self,
-        raw: &HashMap<String, HashMap<String, OwnedVariant>>,
-    ) -> WifiSecurity {
-        if raw.get("802-1x").is_some() {
-            return WifiSecurity::Enterprise;
-        }
-        let key_mgmt = raw
-            .get("802-11-wireless-security")
-            .and_then(|s| get_str_value(s, "key-mgmt"));
-
-        match key_mgmt.as_deref() {
-            Some("wpa-psk") => WifiSecurity::Wpa2,
-            Some("sae") => WifiSecurity::Wpa3,
-            Some("wpa-eap") => WifiSecurity::Enterprise,
-            Some("none") | Some("ieee8021x") => WifiSecurity::Wep,
-            _ => WifiSecurity::None,
-        }
-    }
-
     async fn find_wireless_path(&self) -> Result<zbus::OwnedObjectPath> {
-        let nm = NetworkManagerProxy::new(&self.conn).await?;
+        let nm = self.nm().await?;
         for path in nm.devices().await? {
-            let dev = DeviceProxy::builder(&self.conn)
+            let dev = uncached::<DeviceProxy>(&self.conn)
                 .path(path.as_str())
                 .build()
                 .await?;
@@ -615,7 +671,7 @@ impl NmClient {
 
     async fn access_points(&self) -> Result<Vec<WifiInfo>> {
         let path = self.find_wireless_path().await?;
-        let wireless = DeviceWirelessProxy::builder(&self.conn)
+        let wireless = uncached::<DeviceWirelessProxy>(&self.conn)
             .path(path.as_str())
             .build()
             .await?;
@@ -623,7 +679,7 @@ impl NmClient {
         let mut results = Vec::new();
 
         for path in paths {
-            match self.build_access_point(path.as_str()).await {
+            match self.build_access_point(&path).await {
                 Ok(ap) => results.push(ap),
                 Err(e) => warn!(?path, error = %e, "skipping access point"),
             }
@@ -632,30 +688,49 @@ impl NmClient {
         Ok(results)
     }
 
-    async fn build_access_point(&self, path: &str) -> Result<WifiInfo> {
-        let ap = AccessPointProxy::builder(&self.conn)
-            .path(path)
-            .build()
+    async fn build_access_point(&self, path: &ObjectPath<'_>) -> Result<WifiInfo> {
+        let ap = self
+            .get_all(path, "org.freedesktop.NetworkManager.AccessPoint")
             .await?;
 
-        let ssid_bytes = ap.ssid().await?;
+        let ssid_bytes: Vec<u8> = ap.get("Ssid").unwrap_or_default();
         let ssid = String::from_utf8(ssid_bytes).unwrap_or_default();
         if ssid.is_empty() {
-            return Err(Error::AccessPointNotFound(path.to_owned()));
+            return Err(Error::AccessPointNotFound(path.to_string()));
         }
 
-        let flags = ap.flags().await.unwrap_or(0);
-        let wpa_flags = ap.wpa_flags().await.unwrap_or(0);
-        let rsn_flags = ap.rsn_flags().await.unwrap_or(0);
+        let flags = ap.get("Flags").unwrap_or(0);
+        let wpa_flags = ap.get("WpaFlags").unwrap_or(0);
+        let rsn_flags = ap.get("RsnFlags").unwrap_or(0);
 
         Ok(WifiInfo {
             ssid,
-            strength: ap.strength().await.unwrap_or(0),
+            strength: ap.get("Strength").unwrap_or(0),
             security: security_from_ap(flags, wpa_flags, rsn_flags),
-            frequency: Some(ap.frequency().await.unwrap_or(0)),
-            bssid: Some(ap.hw_address().await.unwrap_or_default()),
+            frequency: ap.get::<u32>("Frequency").filter(|f| *f != 0),
+            bssid: ap.get::<String>("HwAddress").filter(|b| !b.is_empty()),
             mode: WifiMode::Infrastructure,
         })
+    }
+}
+
+/// Live details of an active connection.
+struct ActiveInfo {
+    status: ConnectionStatus,
+    device: Option<String>,
+    ip4: Option<Ip4Config>,
+    ip6: Option<Ip6Config>,
+}
+
+impl Default for ActiveInfo {
+    /// A saved profile that isn't active.
+    fn default() -> Self {
+        Self {
+            status: ConnectionStatus::Inactive,
+            device: None,
+            ip4: None,
+            ip6: None,
+        }
     }
 }
 
@@ -682,42 +757,12 @@ fn get_u32_value(map: &HashMap<String, OwnedVariant>, key: &str) -> Option<u32> 
     u32::try_from(v).ok()
 }
 
-async fn parse_ip4_config(cfg: &Ip4ConfigProxy<'_>) -> Option<Ip4Config> {
-    let addresses = cfg.address_data().await.ok()?;
-    let parsed = parse_live_ip_config(&addresses, 24)?;
-    let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
-    let nameservers = cfg
-        .nameserver_data()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|ns| get_str_value(&ns, "address"))
-        .collect();
-
-    Some(Ip4Config {
-        address: parsed,
-        gateway,
-        nameservers,
-    })
-}
-
-async fn parse_ip6_config(cfg: &Ip6ConfigProxy<'_>) -> Option<Ip6Config> {
-    let addresses = cfg.address_data().await.ok()?;
-    let parsed = parse_live_ip_config(&addresses, 64)?;
-    let gateway = cfg.gateway().await.ok().filter(|g| !g.is_empty());
-    let nameservers = cfg
-        .nameserver_data()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|ns| get_str_value(&ns, "address"))
-        .collect();
-
-    Some(Ip6Config {
-        address: parsed,
-        gateway,
-        nameservers,
-    })
+/// Format IP6Config `Nameservers` (`aay`, 16 bytes each) as addresses.
+fn ipv6_nameservers(raw: Vec<Vec<u8>>) -> Vec<String> {
+    raw.into_iter()
+        .filter_map(|bytes| <[u8; 16]>::try_from(bytes).ok())
+        .map(|octets| std::net::Ipv6Addr::from(octets).to_string())
+        .collect()
 }
 
 fn parse_live_ip_config(
@@ -755,27 +800,35 @@ fn kind_order(kind: &ConnectionKind) -> u8 {
     }
 }
 
-/// Derive Wi-Fi security from NM access-point flag bitmasks.
+/// Derive Wi-Fi security from NM access-point flag bitmasks
+/// (`NM80211ApFlags` and `NM80211ApSecurityFlags`).
 pub(crate) fn security_from_ap(flags: u32, wpa_flags: u32, rsn_flags: u32) -> WifiSecurity {
     const AP_FLAG_PRIVACY: u32 = 0x1;
-    const AP_SEC_PAIR_WPA: u32 = 0x1;
-    const AP_SEC_PAIR_RSN: u32 = 0x2;
     const AP_SEC_KEY_MGMT_PSK: u32 = 0x100;
     const AP_SEC_KEY_MGMT_802_1X: u32 = 0x200;
     const AP_SEC_KEY_MGMT_SAE: u32 = 0x400;
+    const AP_SEC_KEY_MGMT_OWE: u32 = 0x800;
+    const AP_SEC_KEY_MGMT_OWE_TM: u32 = 0x1000;
+    const AP_SEC_KEY_MGMT_EAP_SUITE_B_192: u32 = 0x2000;
 
     let sec = wpa_flags | rsn_flags;
+    // A WPA2/WPA3 transition network offers both PSK and SAE; a password
+    // profile (wpa-psk) works on it, as it does on WPA2.
+    if sec & AP_SEC_KEY_MGMT_PSK != 0 {
+        return if rsn_flags & AP_SEC_KEY_MGMT_PSK != 0 {
+            WifiSecurity::Wpa2
+        } else {
+            WifiSecurity::Wpa
+        };
+    }
     if sec & AP_SEC_KEY_MGMT_SAE != 0 {
         return WifiSecurity::Wpa3;
     }
-    if sec & AP_SEC_KEY_MGMT_802_1X != 0 {
+    if sec & (AP_SEC_KEY_MGMT_802_1X | AP_SEC_KEY_MGMT_EAP_SUITE_B_192) != 0 {
         return WifiSecurity::Enterprise;
     }
-    if sec & (AP_SEC_KEY_MGMT_PSK | AP_SEC_PAIR_RSN | AP_SEC_PAIR_WPA) != 0 {
-        return WifiSecurity::Wpa2;
-    }
-    if wpa_flags != 0 {
-        return WifiSecurity::Wpa;
+    if sec & (AP_SEC_KEY_MGMT_OWE | AP_SEC_KEY_MGMT_OWE_TM) != 0 {
+        return WifiSecurity::Owe;
     }
     if flags & AP_FLAG_PRIVACY != 0 {
         return WifiSecurity::Wep;

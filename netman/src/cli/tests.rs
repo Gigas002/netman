@@ -11,7 +11,7 @@ fn defaults_are_none() {
     assert!(opts.config.is_none());
     assert_eq!(opts.verbose, 0);
     assert!(opts.log_file.is_none());
-    assert_eq!(opts.tick_rate, 1000);
+    assert_eq!(opts.tick_rate, None);
 }
 
 #[test]
@@ -35,7 +35,14 @@ fn verbose_count() {
 #[test]
 fn tick_rate_override() {
     let opts = parse_args(&["--tick-rate", "500"]);
-    assert_eq!(opts.tick_rate, 500);
+    assert_eq!(opts.tick_rate, Some(500));
+}
+
+#[test]
+fn tick_rate_zero_is_rejected() {
+    // A zero period panics tokio's interval after raw mode is on.
+    let err = CliOptions::try_parse_from(["netman", "--tick-rate", "0"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
 }
 
 #[test]

@@ -48,6 +48,14 @@ fn cli_verbose_beats_config_log_level() {
 }
 
 #[test]
+fn cli_tick_rate_of_1000_beats_config() {
+    let mut cfg = FileConfig::default();
+    cfg.ui.tick_rate = Some(200);
+    let s = resolve(cli(&["--tick-rate", "1000"]), Some(cfg));
+    assert_eq!(s.tick_rate, 1000);
+}
+
+#[test]
 fn cli_tick_rate_not_1000_beats_config() {
     let mut cfg = FileConfig::default();
     cfg.ui.tick_rate = Some(200);

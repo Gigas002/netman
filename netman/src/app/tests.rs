@@ -3,7 +3,9 @@ use libnetman::connection::{
     Ipv6Profile, NmState, VpnProfile, WifiInfo, WifiMode, WifiProfile, WifiSecurity,
 };
 
-use super::{EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status};
+use super::{
+    Action, App, EditorFieldId, ListItem, build_list_items, editor_fields_for, is_inflight_status,
+};
 
 fn wifi(ssid: &str, strength: u8, active: bool) -> Connection {
     Connection {
@@ -184,4 +186,312 @@ fn build_list_items_includes_mobile_section() {
             .iter()
             .any(|i| matches!(i, ListItem::Header(h) if h == "Mobile"))
     );
+}
+
+// ── App behavior ──────────────────────────────────────────────────────────────
+
+/// An `App` showing `connections`, as if NetworkManager had returned them.
+fn app_with(connections: Vec<Connection>) -> super::App {
+    super::App {
+        items: build_list_items(connections),
+        selected: 0,
+        show_detail: true,
+        nm_state: NmState::ConnectedGlobal,
+        networking_enabled: true,
+        wireless_enabled: true,
+        demo_mode: false,
+        show_help: false,
+        status_message: None,
+        password_prompt: None,
+        hidden_network_prompt: None,
+        connection_editor: None,
+        add_connection_menu: None,
+        vpn_add_menu: None,
+        vpn_import_prompt: None,
+        delete_confirm_prompt: None,
+        #[cfg(feature = "dbus")]
+        scan_pending: None,
+        #[cfg(feature = "mobile")]
+        pin_unlock_prompt: None,
+        #[cfg(feature = "dbus")]
+        nm: None,
+        state_watcher: {
+            #[cfg(feature = "dbus")]
+            {
+                super::StateChangeWaiter::new(None)
+            }
+            #[cfg(not(feature = "dbus"))]
+            {
+                super::StateChangeWaiter::new()
+            }
+        },
+    }
+}
+
+fn visible(ssid: &str, strength: u8, security: WifiSecurity) -> Connection {
+    let mut c = wifi(ssid, strength, false);
+    c.uuid = format!("visible:{ssid}");
+    c.saved = false;
+    if let ConnectionKind::Wifi(w) = &mut c.kind {
+        w.security = security;
+    }
+    c
+}
+
+#[test]
+fn enter_on_an_owe_network_connects_without_a_password() {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = app_with(vec![visible("Enhanced-Open", 70, WifiSecurity::Owe)]);
+
+    let action = app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(app.password_prompt.is_none());
+    assert!(matches!(
+        action,
+        super::Action::ConnectUnsaved {
+            security: WifiSecurity::Owe,
+            password: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn selection_follows_the_connection_when_a_refresh_reorders_the_list() {
+    let mut app = app_with(vec![wifi("Strong", 90, false), wifi("Weak", 40, false)]);
+    app.selected = 1;
+    assert_eq!(app.selected_conn().unwrap().id, "Weak");
+
+    // Signal changed: "Weak" now sorts first.
+    app.set_items(build_list_items(vec![
+        wifi("Strong", 30, false),
+        wifi("Weak", 80, false),
+    ]));
+
+    assert_eq!(app.selected_conn().unwrap().id, "Weak");
+}
+
+#[test]
+fn selection_stays_in_range_when_the_selected_connection_disappears() {
+    let mut app = app_with(vec![
+        wifi("A", 90, false),
+        wifi("B", 80, false),
+        wifi("C", 70, false),
+    ]);
+    app.selected = 3; // the "Connect to hidden…" row
+    app.set_items(build_list_items(vec![wifi("A", 90, false)]));
+    assert!(app.selected_hidden_wifi());
+
+    app.selected = 0;
+    app.set_items(build_list_items(vec![wifi("B", 80, false)]));
+    assert_eq!(app.selected_conn().unwrap().id, "B");
+}
+
+#[cfg(feature = "dbus")]
+#[test]
+fn scanning_status_clears_when_last_scan_moves() {
+    let mut app = app_with(vec![]);
+    app.status_message = Some(super::SCANNING.into());
+    app.scan_pending = Some(5_000);
+
+    app.note_last_scan(Some(5_000));
+    assert_eq!(app.status_message.as_deref(), Some(super::SCANNING));
+
+    app.note_last_scan(Some(9_000));
+    assert_eq!(app.status_message, None);
+    assert_eq!(app.scan_pending, None);
+}
+
+#[cfg(feature = "dbus")]
+#[test]
+fn scanning_status_clears_when_last_scan_is_unavailable() {
+    let mut app = app_with(vec![]);
+    app.status_message = Some(super::SCANNING.into());
+    app.scan_pending = Some(-1);
+
+    app.note_last_scan(None);
+
+    assert_eq!(app.status_message, None);
+}
+
+#[cfg(feature = "dbus")]
+#[test]
+fn auto_scan_only_with_nm_and_wifi_on() {
+    let mut app = app_with(vec![]);
+    assert!(app.wants_auto_scan());
+    app.wireless_enabled = false;
+    assert!(!app.wants_auto_scan());
+    app.wireless_enabled = true;
+    app.networking_enabled = false;
+    assert!(!app.wants_auto_scan());
+    app.networking_enabled = true;
+    app.demo_mode = true;
+    assert!(!app.wants_auto_scan());
+}
+
+#[test]
+fn auto_scan_timer_follows_settings() {
+    let mut settings = crate::settings::Settings::default();
+    assert!(settings.auto_scan);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    assert_eq!(
+        super::auto_scan_timer(&settings).map(|t| t.period()),
+        Some(std::time::Duration::from_secs(30))
+    );
+    settings.scan_interval = 0;
+    assert!(super::auto_scan_timer(&settings).is_none());
+    settings.scan_interval = 30;
+    settings.auto_scan = false;
+    assert!(super::auto_scan_timer(&settings).is_none());
+}
+
+#[test]
+fn pasted_text_loses_newlines_and_control_characters() {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = app_with(vec![visible("Cafe", 70, WifiSecurity::Wpa2)]);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.password_prompt.is_some());
+
+    app.handle_paste("hunter2\r\n");
+
+    assert_eq!(
+        app.password_prompt.as_ref().unwrap().input.text(),
+        "hunter2"
+    );
+}
+
+#[test]
+fn vpn_menu_without_plugins_says_so() {
+    let mut app = app_with(vec![]);
+    app.demo_mode = false;
+
+    app.open_vpn_add_menu_with(Vec::new());
+
+    assert!(app.vpn_add_menu.is_none());
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("No VPN plugins installed.")
+    );
+}
+
+#[test]
+fn vpn_menu_in_demo_mode_offers_a_sample_plugin() {
+    let mut app = app_with(vec![]);
+    app.demo_mode = true;
+
+    app.open_vpn_add_menu_with(Vec::new());
+
+    assert_eq!(app.vpn_add_menu.unwrap().plugins.len(), 1);
+}
+
+fn hidden_prompt_app() -> App {
+    let mut app = app_with(vec![]);
+    app.hidden_network_prompt = Some(crate::app::HiddenNetworkPrompt::new());
+    app
+}
+
+fn type_text(app: &mut App, text: &str) {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    for c in text.chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+    }
+}
+
+fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) -> Action {
+    app.handle_key(code, ratatui::crossterm::event::KeyModifiers::NONE)
+}
+
+#[test]
+fn hidden_network_defaults_to_wpa2_with_a_password() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab); // security
+    press(&mut app, KeyCode::Tab); // password
+    type_text(&mut app, "hunter22");
+
+    match press(&mut app, KeyCode::Enter) {
+        Action::ConnectUnsaved {
+            ssid,
+            security,
+            password,
+            hidden,
+        } => {
+            assert_eq!(ssid, "Attic");
+            assert_eq!(security, WifiSecurity::Wpa2);
+            assert_eq!(password.as_deref(), Some("hunter22"));
+            assert!(hidden);
+        }
+        _ => panic!("expected a connect action"),
+    }
+}
+
+#[test]
+fn hidden_network_can_be_wpa3_only() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Right); // WPA3
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "hunter22");
+
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        Action::ConnectUnsaved {
+            security: WifiSecurity::Wpa3,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hidden_owe_network_skips_the_password() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Left); // wraps to OWE
+    assert_eq!(
+        app.hidden_network_prompt.as_ref().unwrap().security,
+        WifiSecurity::Owe
+    );
+    // Tab goes back to the SSID: there is no password field to visit.
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        app.hidden_network_prompt.as_ref().unwrap().focused,
+        crate::app::HiddenPromptField::Ssid
+    );
+
+    assert!(matches!(
+        press(&mut app, KeyCode::Enter),
+        Action::ConnectUnsaved {
+            security: WifiSecurity::Owe,
+            password: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hidden_wpa2_without_a_password_is_refused() {
+    use ratatui::crossterm::event::KeyCode;
+    let mut app = hidden_prompt_app();
+    type_text(&mut app, "Attic");
+
+    assert!(matches!(press(&mut app, KeyCode::Enter), Action::Continue));
+
+    let prompt = app.hidden_network_prompt.as_ref().unwrap();
+    assert!(
+        prompt
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("needs a password")
+    );
+    assert_eq!(prompt.focused, crate::app::HiddenPromptField::Password);
 }

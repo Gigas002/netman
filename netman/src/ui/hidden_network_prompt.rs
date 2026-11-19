@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Hidden Wi-Fi network connection modal (SSID + password).
+//! Hidden Wi-Fi network connection modal (SSID, security, password).
 
 use ratatui::{
     Frame,
@@ -18,12 +18,13 @@ use crate::{
 /// Render the hidden-network overlay when active.
 pub fn render(frame: &mut Frame, area: Rect, prompt: &HiddenNetworkPrompt) {
     let width = 54u16.min(area.width.saturating_sub(4));
-    let height = 13u16.min(area.height.saturating_sub(4));
+    let height = 16u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let overlay = Rect::new(x, y, width, height);
 
     let ssid_label = field_label("SSID", prompt.focused == HiddenPromptField::Ssid);
+    let security_label = field_label("Security", prompt.focused == HiddenPromptField::Security);
     let password_label = field_label("Password", prompt.focused == HiddenPromptField::Password);
 
     let mut lines = vec![
@@ -31,9 +32,23 @@ pub fn render(frame: &mut Frame, area: Rect, prompt: &HiddenNetworkPrompt) {
         ssid_label,
         prompt.ssid.render_line(true, width),
         Line::raw(""),
-        password_label,
-        prompt.password.render_line(prompt.show_password, width),
+        security_label,
+        Line::from(vec![
+            Span::styled("  ◀ ", Style::default().fg(FG_DIM)),
+            Span::raw(prompt.security.label()),
+            Span::styled(" ▶", Style::default().fg(FG_DIM)),
+        ]),
+        Line::raw(""),
     ];
+    if prompt.security.needs_password() {
+        lines.push(password_label);
+        lines.push(prompt.password.render_line(prompt.show_password, width));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  No password",
+            Style::default().fg(FG_DIM),
+        )));
+    }
 
     if let Some(err) = &prompt.error {
         lines.push(Line::raw(""));
@@ -47,6 +62,8 @@ pub fn render(frame: &mut Frame, area: Rect, prompt: &HiddenNetworkPrompt) {
     lines.push(Line::from(vec![
         Span::styled("  Tab", Style::default().fg(FG_ACCENT)),
         Span::raw(" next field   "),
+        Span::styled("←/→", Style::default().fg(FG_ACCENT)),
+        Span::raw(" security   "),
         Span::styled("Enter", Style::default().fg(FG_ACCENT)),
         Span::raw(" connect"),
     ]));

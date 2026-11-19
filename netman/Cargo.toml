@@ -3,7 +3,6 @@ name = "netman"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-homepage.workspace = true
 description = "TUI applet analogue of network-manager-applet"
 keywords.workspace = true
 repository.workspace = true
@@ -16,7 +15,7 @@ dbus = ["libnetman/dbus"]
 mobile = ["libnetman/mobile"]
 
 [dependencies]
-libnetman = { path = "../libnetman", version = "0.1.0" }
+libnetman = { path = "../libnetman", version = "0.2.0" }
 
 anyhow.workspace = true
 clap.workspace = true
